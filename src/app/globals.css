@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   BASE
+   ============================================================ */
+@layer base {
+  html {
+    color: theme(colors.ink.900);
+    background-color: theme(colors.parchment.50);
+  }
+
+  body {
+    position: relative;
+    min-height: 100vh;
+    font-feature-settings: "ss01", "ss02", "kern";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Paper grain overlay — sits above the page background, below content */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image: theme(backgroundImage.paper-grain);
+    background-repeat: repeat;
+    opacity: 0.07;
+    mix-blend-mode: multiply;
+  }
+
+  /* Ensure all real content sits above the grain */
+  body > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: theme(fontFamily.display);
+    color: theme(colors.ink.900);
+    font-weight: 500;
+  }
+
+  /* Small vertical pattern of hairlines used as section dividers */
+  hr {
+    border: 0;
+    height: 1px;
+    background-color: rgba(122, 102, 80, 0.18);
+  }
+
+  ::selection {
+    background-color: theme(colors.gold.400);
+    color: theme(colors.ink.900);
+  }
+}
+
+/* ============================================================
+   COMPONENTS
+   ============================================================ */
+@layer components {
+  .ml-hairline {
+    border-color: rgba(122, 102, 80, 0.18);
+  }
+
+  .ml-card {
+    background-color: theme(colors.parchment.50);
+    border: 1px solid rgba(122, 102, 80, 0.18);
+    box-shadow: theme(boxShadow.paper);
+    border-radius: 4px;
+  }
+
+  .ml-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background-color: theme(colors.parchment.100);
+    border: 1px solid rgba(122, 102, 80, 0.22);
+    color: theme(colors.ink.700);
+    font-size: 0.72rem;
+    letter-spacing: 0.01em;
+    font-family: theme(fontFamily.sans);
+    white-space: nowrap;
+  }
+
+  .ml-chip--accent {
+    background-color: theme(colors.oxblood.50);
+    border-color: rgba(123, 45, 38, 0.4);
+    color: theme(colors.oxblood.700);
+  }
+
+  .ml-chip--forest {
+    background-color: theme(colors.forest.50);
+    border-color: rgba(31, 61, 47, 0.35);
+    color: theme(colors.forest.600);
+  }
+
+  .ml-chip--gold {
+    background-color: rgba(201, 169, 97, 0.18);
+    border-color: rgba(184, 149, 73, 0.5);
+    color: theme(colors.gold.600);
+  }
+
+  /* Drop-cap utility for prose intros */
+  .ml-dropcap::first-letter {
+    font-family: theme(fontFamily.display);
+    font-size: 3.5em;
+    line-height: 0.85;
+    float: left;
+    padding: 0.25rem 0.6rem 0 0;
+    color: theme(colors.oxblood.700);
+  }
+}
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+@layer utilities {
+  .ml-text-balance {
+    text-wrap: balance;
+  }
+
+  .ml-rule-double {
+    border-top: 1px solid rgba(122, 102, 80, 0.4);
+    border-bottom: 1px solid rgba(122, 102, 80, 0.4);
+    box-shadow: inset 0 2px 0 theme(colors.parchment.50),
+                inset 0 -2px 0 theme(colors.parchment.50);
+    padding: 0.3rem 0;
+  }
+}
