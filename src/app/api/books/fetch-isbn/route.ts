@@ -8,7 +8,6 @@ interface FetchBody {
   isbn?: string;
 }
 
-/** Normalised result the form can consume. */
 export interface IsbnLookupResult {
   title?: string;
   subtitle?: string;
@@ -21,7 +20,11 @@ export interface IsbnLookupResult {
   isbn_10?: string;
   isbn_13?: string;
   cover_url?: string;
-  source: "google_books" | "open_library";
+  source:
+    | "google_books"
+    | "google_books_text"
+    | "open_library_isbn"
+    | "open_library_data";
 }
 
 async function requireAdmin(
@@ -51,7 +54,6 @@ async function requireAdmin(
   return { uid: decoded.uid };
 }
 
-/** Strip everything but digits; preserves trailing 'X' for ISBN-10. */
 function cleanIsbn(raw: string): string {
   return raw.replace(/[^0-9Xx]/g, "").toUpperCase();
 }
@@ -66,41 +68,29 @@ function pickIsbns(identifiers: { type: string; identifier: string }[]) {
   return { isbn_10, isbn_13 };
 }
 
-async function fromGoogleBooks(
-  isbn: string,
-): Promise<IsbnLookupResult | null> {
-  const url = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    totalItems?: number;
-    items?: Array<{
-      volumeInfo?: {
-        title?: string;
-        subtitle?: string;
-        authors?: string[];
-        publisher?: string;
-        publishedDate?: string;
-        description?: string;
-        pageCount?: number;
-        language?: string;
-        industryIdentifiers?: { type: string; identifier: string }[];
-        imageLinks?: { thumbnail?: string; smallThumbnail?: string };
-      };
-    }>;
-  };
+interface GoogleVolumeInfo {
+  title?: string;
+  subtitle?: string;
+  authors?: string[];
+  publisher?: string;
+  publishedDate?: string;
+  description?: string;
+  pageCount?: number;
+  language?: string;
+  industryIdentifiers?: { type: string; identifier: string }[];
+  imageLinks?: { thumbnail?: string; smallThumbnail?: string };
+}
 
-  if (!data.items?.length) return null;
-  const v = data.items[0].volumeInfo;
-  if (!v) return null;
-
+function googleVolumeToResult(
+  v: GoogleVolumeInfo,
+  source: "google_books" | "google_books_text",
+): IsbnLookupResult {
   const { isbn_10, isbn_13 } = pickIsbns(v.industryIdentifiers ?? []);
   const year = v.publishedDate?.match(/^(\d{4})/)?.[1];
   const cover = (v.imageLinks?.thumbnail ?? v.imageLinks?.smallThumbnail)?.replace(
     /^http:/,
     "https:",
   );
-
   return {
     title: v.title,
     subtitle: v.subtitle,
@@ -113,11 +103,108 @@ async function fromGoogleBooks(
     isbn_10,
     isbn_13,
     cover_url: cover,
-    source: "google_books",
+    source,
   };
 }
 
-async function fromOpenLibrary(
+async function tryGoogleBooks(
+  query: string,
+  apiKey: string | undefined,
+  label: string,
+): Promise<{
+  status: number;
+  volumeInfo?: GoogleVolumeInfo;
+  totalItems?: number;
+  raw?: string;
+}> {
+  const url = new URL("https://www.googleapis.com/books/v1/volumes");
+  url.searchParams.set("q", query);
+  url.searchParams.set("maxResults", "5");
+  if (apiKey) url.searchParams.set("key", apiKey);
+
+  const res = await fetch(url.toString(), {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    return { status: res.status, raw: body.slice(0, 300) };
+  }
+  const data = (await res.json()) as {
+    totalItems?: number;
+    items?: Array<{ volumeInfo?: GoogleVolumeInfo }>;
+  };
+  console.info(
+    `[fetch-isbn] Google Books ${label} → totalItems=${data.totalItems}`,
+  );
+  const v = data.items?.[0]?.volumeInfo;
+  return { status: 200, volumeInfo: v, totalItems: data.totalItems };
+}
+
+async function tryOpenLibraryIsbn(
+  isbn: string,
+): Promise<IsbnLookupResult | null> {
+  const res = await fetch(`https://openlibrary.org/isbn/${isbn}.json`, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  console.info(`[fetch-isbn] Open Library /isbn → ${res.status}`);
+  if (!res.ok) return null;
+  const v = (await res.json()) as {
+    title?: string;
+    subtitle?: string;
+    publishers?: string[];
+    publish_date?: string;
+    number_of_pages?: number;
+    languages?: { key: string }[];
+    isbn_10?: string[];
+    isbn_13?: string[];
+    authors?: { key: string }[];
+    covers?: number[];
+    description?: string | { value?: string };
+  };
+  const year = v.publish_date?.match(/(\d{4})/)?.[1];
+  const cover =
+    v.covers?.[0] && `https://covers.openlibrary.org/b/id/${v.covers[0]}-L.jpg`;
+  const desc =
+    typeof v.description === "string" ? v.description : v.description?.value;
+  const lang = v.languages?.[0]?.key?.split("/").pop();
+
+  let authors: string[] | undefined;
+  if (v.authors && v.authors.length) {
+    try {
+      authors = await Promise.all(
+        v.authors.map(async (a) => {
+          const r = await fetch(`https://openlibrary.org${a.key}.json`, {
+            cache: "no-store",
+          });
+          const j = (await r.json()) as { name?: string };
+          return j.name ?? "";
+        }),
+      );
+      authors = authors.filter(Boolean);
+    } catch (err) {
+      console.warn("[fetch-isbn] Open Library author resolution failed", err);
+    }
+  }
+
+  return {
+    title: v.title,
+    subtitle: v.subtitle,
+    authors,
+    publisher: v.publishers?.[0],
+    publication_year: year ? Number(year) : undefined,
+    description: desc,
+    page_count: v.number_of_pages,
+    language: lang,
+    isbn_10: v.isbn_10?.[0],
+    isbn_13: v.isbn_13?.[0],
+    cover_url: cover ?? undefined,
+    source: "open_library_isbn",
+  };
+}
+
+async function tryOpenLibraryData(
   isbn: string,
 ): Promise<IsbnLookupResult | null> {
   const url = `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(isbn)}&format=json&jscmd=data`;
@@ -134,21 +221,17 @@ async function fromOpenLibrary(
       number_of_pages?: number;
       cover?: { small?: string; medium?: string; large?: string };
       notes?: string | { value?: string };
-      identifiers?: {
-        isbn_10?: string[];
-        isbn_13?: string[];
-      };
+      identifiers?: { isbn_10?: string[]; isbn_13?: string[] };
     }
   >;
-  const key = `ISBN:${isbn}`;
-  const v = data[key];
+  const v = data[`ISBN:${isbn}`];
+  console.info(
+    `[fetch-isbn] Open Library /api/books → ${v ? "found" : "empty"}`,
+  );
   if (!v) return null;
 
   const year = v.publish_date?.match(/(\d{4})/)?.[1];
-  const isbn10 = v.identifiers?.isbn_10?.[0];
-  const isbn13 = v.identifiers?.isbn_13?.[0];
   const notes = typeof v.notes === "string" ? v.notes : v.notes?.value;
-
   return {
     title: v.title,
     subtitle: v.subtitle,
@@ -157,10 +240,10 @@ async function fromOpenLibrary(
     publication_year: year ? Number(year) : undefined,
     page_count: v.number_of_pages,
     cover_url: v.cover?.large ?? v.cover?.medium ?? v.cover?.small,
-    isbn_10: isbn10,
-    isbn_13: isbn13,
+    isbn_10: v.identifiers?.isbn_10?.[0],
+    isbn_13: v.identifiers?.isbn_13?.[0],
     description: notes,
-    source: "open_library",
+    source: "open_library_data",
   };
 }
 
@@ -183,22 +266,78 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Google first, then Open Library
+  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
+  console.info(`[fetch-isbn] Looking up ${isbn} (apiKey: ${!!apiKey})`);
+
+  // ── Tier 1: Google Books, exact ISBN query ───────────────────────────────
   try {
-    const g = await fromGoogleBooks(isbn);
-    if (g && g.title) return NextResponse.json(g);
+    const r = await tryGoogleBooks(`isbn:${isbn}`, apiKey, "isbn:");
+    if (r.status === 200 && r.volumeInfo?.title) {
+      return NextResponse.json(
+        googleVolumeToResult(r.volumeInfo, "google_books"),
+      );
+    }
+    if (r.status !== 200) {
+      console.warn(
+        `[fetch-isbn] Google Books isbn: failed → ${r.status} ${r.raw ?? ""}`,
+      );
+    }
   } catch (err) {
-    console.warn("[fetch-isbn] Google Books error", err);
-  }
-  try {
-    const o = await fromOpenLibrary(isbn);
-    if (o && o.title) return NextResponse.json(o);
-  } catch (err) {
-    console.warn("[fetch-isbn] Open Library error", err);
+    console.warn("[fetch-isbn] Google Books isbn: threw", err);
   }
 
+  // ── Tier 2: Google Books, plain text — catches editions whose ISBN ───────
+  //    index entry is missing but whose volume is in the catalogue. ────────
+  try {
+    const r = await tryGoogleBooks(isbn, apiKey, "plain");
+    if (r.status === 200 && r.volumeInfo?.title) {
+      const { isbn_10, isbn_13 } = pickIsbns(
+        r.volumeInfo.industryIdentifiers ?? [],
+      );
+      // Only accept if the returned volume actually carries this ISBN.
+      if (
+        isbn_10 === isbn ||
+        isbn_13 === isbn ||
+        isbn_10?.replace(/-/g, "") === isbn ||
+        isbn_13?.replace(/-/g, "") === isbn
+      ) {
+        return NextResponse.json(
+          googleVolumeToResult(r.volumeInfo, "google_books_text"),
+        );
+      }
+    }
+    if (r.status !== 200) {
+      console.warn(
+        `[fetch-isbn] Google Books plain failed → ${r.status} ${r.raw ?? ""}`,
+      );
+    }
+  } catch (err) {
+    console.warn("[fetch-isbn] Google Books plain threw", err);
+  }
+
+  // ── Tier 3: Open Library direct /isbn/{isbn}.json ────────────────────────
+  try {
+    const ol = await tryOpenLibraryIsbn(isbn);
+    if (ol && ol.title) return NextResponse.json(ol);
+  } catch (err) {
+    console.warn("[fetch-isbn] Open Library /isbn threw", err);
+  }
+
+  // ── Tier 4: Open Library data API ────────────────────────────────────────
+  try {
+    const ol = await tryOpenLibraryData(isbn);
+    if (ol && ol.title) return NextResponse.json(ol);
+  } catch (err) {
+    console.warn("[fetch-isbn] Open Library /api/books threw", err);
+  }
+
+  console.info(`[fetch-isbn] All sources missed for ${isbn}`);
   return NextResponse.json(
-    { error: `No book found for ISBN ${isbn}. Try entering details manually.` },
+    {
+      error: apiKey
+        ? `No book found for ISBN ${isbn} in any source. Try entering details manually.`
+        : `No book found for ISBN ${isbn}. (Tip: ask the librarian to set GOOGLE_BOOKS_API_KEY in Vercel to avoid the shared anonymous quota.)`,
+    },
     { status: 404 },
   );
 }
