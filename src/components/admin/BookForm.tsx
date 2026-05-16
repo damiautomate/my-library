@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
+import { FileUploader } from "./FileUploader";
 import {
   ClassificationPicker,
   EMPTY_CLASSIFICATION,
@@ -18,6 +19,7 @@ export interface BookFormValue extends ClassificationValue {
   authors: string; // comma-separated input
   description: string;
   cover_url: string;
+  cover_public_id: string;
   isbn_10: string;
   isbn_13: string;
   publisher: string;
@@ -29,6 +31,14 @@ export interface BookFormValue extends ClassificationValue {
   amazon_url: string;
   external_url: string;
   status: BookStatus;
+  // File slots — set when uploads complete
+  pdf_url: string;
+  pdf_public_id: string;
+  epub_url: string;
+  epub_public_id: string;
+  audio_summary_url: string;
+  audio_summary_public_id: string;
+  audio_summary_duration_seconds: number | null;
 }
 
 export const EMPTY_BOOK_FORM: BookFormValue = {
@@ -37,6 +47,7 @@ export const EMPTY_BOOK_FORM: BookFormValue = {
   authors: "",
   description: "",
   cover_url: "",
+  cover_public_id: "",
   isbn_10: "",
   isbn_13: "",
   publisher: "",
@@ -48,6 +59,13 @@ export const EMPTY_BOOK_FORM: BookFormValue = {
   amazon_url: "",
   external_url: "",
   status: "draft",
+  pdf_url: "",
+  pdf_public_id: "",
+  epub_url: "",
+  epub_public_id: "",
+  audio_summary_url: "",
+  audio_summary_public_id: "",
+  audio_summary_duration_seconds: null,
   ...EMPTY_CLASSIFICATION,
 };
 
@@ -58,6 +76,7 @@ export function fromBook(book: Book): BookFormValue {
     authors: (book.authors ?? []).join(", "),
     description: book.description ?? "",
     cover_url: book.cover_url ?? "",
+    cover_public_id: "", // not stored separately in Phase 1; ok if blank
     isbn_10: book.isbn_10 ?? "",
     isbn_13: book.isbn_13 ?? "",
     publisher: book.publisher ?? "",
@@ -70,6 +89,13 @@ export function fromBook(book: Book): BookFormValue {
     amazon_url: book.amazon_url ?? "",
     external_url: book.external_url ?? "",
     status: book.status ?? "draft",
+    pdf_url: book.pdf_url ?? "",
+    pdf_public_id: book.pdf_public_id ?? "",
+    epub_url: book.epub_url ?? "",
+    epub_public_id: book.epub_public_id ?? "",
+    audio_summary_url: book.audio_summary_url ?? "",
+    audio_summary_public_id: book.audio_summary_public_id ?? "",
+    audio_summary_duration_seconds: book.audio_summary_duration_seconds ?? null,
     life_domains: book.life_domains ?? [],
     life_stages: book.life_stages ?? [],
     rooms: book.rooms ?? [],
@@ -108,6 +134,14 @@ export function toBookDoc(v: BookFormValue): Partial<BookDoc> {
     why_this_book: v.why_this_book.trim() || undefined,
     amazon_url: v.amazon_url.trim() || undefined,
     external_url: v.external_url.trim() || undefined,
+    pdf_url: v.pdf_url || undefined,
+    pdf_public_id: v.pdf_public_id || undefined,
+    epub_url: v.epub_url || undefined,
+    epub_public_id: v.epub_public_id || undefined,
+    audio_summary_url: v.audio_summary_url || undefined,
+    audio_summary_public_id: v.audio_summary_public_id || undefined,
+    audio_summary_duration_seconds:
+      v.audio_summary_duration_seconds ?? undefined,
     life_domains: v.life_domains,
     life_stages: v.life_stages,
     rooms: v.rooms,
@@ -134,6 +168,8 @@ interface BookFormProps {
   onSubmit: (status: BookStatus) => Promise<void> | void;
   saving?: boolean;
   submitLabel?: string;
+  /** The (pre-allocated or existing) book document ID — required for file uploads. */
+  bookId: string;
 }
 
 export function BookForm({
@@ -142,6 +178,7 @@ export function BookForm({
   onSubmit,
   saving = false,
   submitLabel = "Save book",
+  bookId,
 }: BookFormProps) {
   const [errors, setErrors] = useState<Partial<Record<keyof BookFormValue, string>>>(
     {},
@@ -262,12 +299,105 @@ export function BookForm({
             value={value.estimated_reading_time_hours}
             onChange={(e) => set("estimated_reading_time_hours", e.target.value)}
           />
-          <div className="md:col-span-2">
-            <Input
-              label="Cover image URL"
-              value={value.cover_url}
-              onChange={(e) => set("cover_url", e.target.value)}
-              hint="In Phase 1 paste a Google Books or Cloudinary URL. File upload arrives in Phase 2."
+        </div>
+      </section>
+
+      {/* Files */}
+      <section className="ml-card p-6">
+        <header className="mb-5 flex items-baseline justify-between border-b ml-hairline pb-3">
+          <h2 className="font-display text-xl">Files</h2>
+          <span className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+            Uploaded directly to Cloudinary
+          </span>
+        </header>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+              Cover image
+            </label>
+            <FileUploader
+              kind="cover"
+              bookId={bookId}
+              url={value.cover_url}
+              publicId={value.cover_public_id}
+              onChange={(r) =>
+                onChange({
+                  ...value,
+                  cover_url: r?.secure_url ?? "",
+                  cover_public_id: r?.public_id ?? "",
+                })
+              }
+            />
+            {!value.cover_url && (
+              <div className="mt-2">
+                <Input
+                  label="…or paste an external cover URL"
+                  value={value.cover_url}
+                  onChange={(e) => set("cover_url", e.target.value)}
+                  placeholder="https://books.google.com/…"
+                />
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+              PDF
+            </label>
+            <FileUploader
+              kind="pdf"
+              bookId={bookId}
+              url={value.pdf_url}
+              publicId={value.pdf_public_id}
+              onChange={(r) =>
+                onChange({
+                  ...value,
+                  pdf_url: r?.secure_url ?? "",
+                  pdf_public_id: r?.public_id ?? "",
+                })
+              }
+            />
+          </div>
+
+          <div>
+            <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+              EPUB
+            </label>
+            <FileUploader
+              kind="epub"
+              bookId={bookId}
+              url={value.epub_url}
+              publicId={value.epub_public_id}
+              onChange={(r) =>
+                onChange({
+                  ...value,
+                  epub_url: r?.secure_url ?? "",
+                  epub_public_id: r?.public_id ?? "",
+                })
+              }
+            />
+          </div>
+
+          <div>
+            <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+              Audio summary
+            </label>
+            <FileUploader
+              kind="audio"
+              bookId={bookId}
+              url={value.audio_summary_url}
+              publicId={value.audio_summary_public_id}
+              onChange={(r) =>
+                onChange({
+                  ...value,
+                  audio_summary_url: r?.secure_url ?? "",
+                  audio_summary_public_id: r?.public_id ?? "",
+                  audio_summary_duration_seconds: r?.duration
+                    ? Math.round(r.duration)
+                    : null,
+                })
+              }
             />
           </div>
         </div>

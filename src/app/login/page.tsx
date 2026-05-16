@@ -17,6 +17,47 @@ import { auth } from "@/lib/firebase/client";
 
 type Mode = "signin" | "signup";
 
+// Friendly translations for Firebase Auth's terse error codes.
+function humanizeAuthError(err: unknown): string {
+  const raw =
+    err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const codeMatch = raw.match(/\(auth\/[a-z0-9-]+\)/);
+  const code = codeMatch ? codeMatch[0].slice(1, -1) : "";
+
+  const map: Record<string, string> = {
+    "auth/email-already-in-use":
+      "An account with that email already exists. Try signing in instead.",
+    "auth/invalid-email": "That email doesn't look right.",
+    "auth/weak-password": "Password must be at least 6 characters.",
+    "auth/wrong-password": "Wrong password. Try again or reset it.",
+    "auth/invalid-credential":
+      "Email or password is incorrect (or this account doesn't exist).",
+    "auth/user-not-found":
+      "No account with that email. Sign up if you have an invitation.",
+    "auth/user-disabled": "This account has been disabled.",
+    "auth/too-many-requests":
+      "Too many attempts. Wait a moment and try again.",
+    "auth/network-request-failed":
+      "Network problem. Check your connection and retry.",
+    "auth/popup-closed-by-user": "Google sign-in window was closed.",
+    "auth/popup-blocked":
+      "Your browser blocked the Google sign-in popup.",
+    "auth/operation-not-allowed":
+      "This sign-in method isn't enabled. Ask the librarian.",
+    "auth/unauthorized-domain":
+      "This domain isn't authorized in Firebase. Tell the librarian.",
+  };
+
+  if (code && map[code]) return map[code];
+
+  // Fall back to a cleaned-up version of whatever Firebase said.
+  const cleaned = raw
+    .replace(/^Firebase:\s*/, "")
+    .replace(/\s*\(auth\/[a-z0-9-]+\)\.?$/, "")
+    .trim();
+  return cleaned || "Sign-in failed. Try again.";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("signin");
@@ -50,9 +91,7 @@ export default function LoginPage() {
       }
       await afterAuth();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Unable to sign in";
-      // Firebase error messages can be noisy
-      setError(msg.replace(/^Firebase: /, "").replace(/\([\w-/]+\)\.?$/, "").trim());
+      setError(humanizeAuthError(err));
     } finally {
       setBusy(false);
     }
@@ -66,8 +105,7 @@ export default function LoginPage() {
       await signInWithGoogle();
       await afterAuth();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Google sign-in failed";
-      setError(msg.replace(/^Firebase: /, "").trim());
+      setError(humanizeAuthError(err));
     } finally {
       setBusy(false);
     }

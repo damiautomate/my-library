@@ -102,6 +102,7 @@ function EditBookContent() {
       )}
 
       <BookForm
+        bookId={bookId}
         value={value}
         onChange={setValue}
         onSubmit={handleSubmit}

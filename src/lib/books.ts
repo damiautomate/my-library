@@ -8,6 +8,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
   Timestamp,
@@ -18,6 +19,12 @@ import type { Book, BookDoc, BookStatus } from "./types";
 import type { LifeDomain, LifeStage, Room } from "./taxonomy";
 
 const BOOKS = "books";
+
+/** Generate a new book ID without writing anything — used to pre-allocate
+ *  before file uploads on the new-book form. */
+export function newBookId(): string {
+  return doc(collection(db, BOOKS)).id;
+}
 
 /** Default values for fields that must always be arrays. */
 function withDefaults(input: Partial<BookDoc>): Partial<BookDoc> {
@@ -50,6 +57,21 @@ export async function createBook(
     status: data.status ?? "draft",
   });
   return ref.id;
+}
+
+/** Variant: writes to an already-chosen ID (so file uploads can target it). */
+export async function createBookWithId(
+  id: string,
+  data: Partial<BookDoc>,
+  adminUid: string,
+): Promise<void> {
+  await setDoc(doc(db, BOOKS, id), {
+    ...withDefaults(data),
+    added_by: adminUid,
+    added_at: serverTimestamp(),
+    updated_at: serverTimestamp(),
+    status: data.status ?? "draft",
+  });
 }
 
 export async function updateBook(

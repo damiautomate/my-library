@@ -1,14 +1,37 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, notFound } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { useParams, useRouter, useSearchParams, notFound } from "next/navigation";
 import Link from "next/link";
-import { BookOpen, Headphones, ExternalLink, Edit, FileText } from "lucide-react";
+import {
+  BookOpen,
+  Headphones,
+  ExternalLink,
+  Edit,
+  FileText,
+  Download,
+  Bookmark,
+  Pause,
+  Play,
+  CheckCircle2,
+  X as XIcon,
+  Star,
+} from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
 import { Tag } from "@/components/ui/Tag";
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
+import { Textarea } from "@/components/ui/Input";
+import { ReadingProgress } from "@/components/library/ReadingProgress";
 import { getBook } from "@/lib/books";
 import { useAuth } from "@/contexts/AuthContext";
+import {
+  setStatus,
+  setRatingAndNotes,
+  watchProgress,
+} from "@/lib/progress";
+import { downloadUrl } from "@/lib/cloudinary";
 import {
   LIFE_DOMAINS,
   LIFE_STAGES,
@@ -18,7 +41,7 @@ import {
   LANGUAGES,
   ROOMS,
 } from "@/lib/taxonomy";
-import type { Book } from "@/lib/types";
+import type { Book, ReadingProgressDoc, ReadingStatus } from "@/lib/types";
 
 export default function BookDetailPage() {
   return (
@@ -31,15 +54,37 @@ export default function BookDetailPage() {
 
 function BookDetailContent() {
   const params = useParams<{ bookId: string }>();
+  const search = useSearchParams();
+  const router = useRouter();
   const bookId = params?.bookId;
-  const { isAdmin } = useAuth();
+  const { isAdmin, firebaseUser } = useAuth();
 
   const [book, setBook] = useState<Book | null | undefined>(undefined);
+  const [progress, setProgress] = useState<ReadingProgressDoc | null>(null);
+  const [showFinish, setShowFinish] = useState(false);
 
   useEffect(() => {
     if (!bookId) return;
     getBook(bookId).then(setBook);
   }, [bookId]);
+
+  useEffect(() => {
+    if (!firebaseUser || !bookId) return;
+    return watchProgress(firebaseUser.uid, bookId, setProgress);
+  }, [firebaseUser, bookId]);
+
+  // ?finish=1 from the reader's near-100% nudge opens the modal automatically
+  useEffect(() => {
+    if (search.get("finish") === "1") setShowFinish(true);
+  }, [search]);
+
+  const handleShelf = useCallback(
+    async (next: ReadingStatus) => {
+      if (!firebaseUser || !bookId) return;
+      await setStatus(firebaseUser.uid, bookId, next);
+    },
+    [firebaseUser, bookId],
+  );
 
   if (book === undefined) {
     return (
@@ -50,14 +95,16 @@ function BookDetailContent() {
       </main>
     );
   }
-
   if (book === null) return notFound();
+
+  const hasReadable = !!(book.pdf_url || book.epub_url);
+  const hasAudio = !!book.audio_summary_url;
 
   return (
     <main className="mx-auto max-w-5xl px-6 pb-24 pt-12">
       {/* Header band */}
       <header className="grid grid-cols-1 gap-10 border-b ml-hairline pb-10 md:grid-cols-12">
-        {/* Cover */}
+        {/* Cover + progress + shelf actions */}
         <div className="md:col-span-4">
           <div className="aspect-[2/3] overflow-hidden rounded-sm border ml-hairline bg-parchment-200 shadow-paper-lg">
             {book.cover_url ? (
@@ -73,9 +120,45 @@ function BookDetailContent() {
               </div>
             )}
           </div>
+
+          {/* Reading progress card */}
+          {progress && (
+            <div className="mt-4">
+              <ReadingProgress progress={progress} />
+            </div>
+          )}
+
+          {/* Shelf controls */}
+          <div className="mt-4 grid grid-cols-2 gap-1.5">
+            <ShelfBtn
+              label="Want to read"
+              icon={<Bookmark size={11} />}
+              active={progress?.status === "want_to_read"}
+              onClick={() => handleShelf("want_to_read")}
+            />
+            <ShelfBtn
+              label="Currently reading"
+              icon={<BookOpen size={11} />}
+              active={progress?.status === "currently_reading"}
+              onClick={() => handleShelf("currently_reading")}
+            />
+            <ShelfBtn
+              label="Pause"
+              icon={<Pause size={11} />}
+              active={progress?.status === "paused"}
+              onClick={() => handleShelf("paused")}
+            />
+            <ShelfBtn
+              label="Finish…"
+              icon={<CheckCircle2 size={11} />}
+              active={progress?.status === "finished"}
+              onClick={() => setShowFinish(true)}
+              tone="forest"
+            />
+          </div>
         </div>
 
-        {/* Title block */}
+        {/* Title block + actions */}
         <div className="md:col-span-8">
           {book.rooms?.[0] && (
             <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
@@ -94,7 +177,6 @@ function BookDetailContent() {
             By {book.authors?.join(", ")}
           </p>
 
-          {/* Quick meta line */}
           <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
             {book.publisher && <span>{book.publisher}</span>}
             {book.publication_year && <span>{book.publication_year}</span>}
@@ -102,48 +184,66 @@ function BookDetailContent() {
             {book.estimated_reading_time_hours && (
               <span>~{book.estimated_reading_time_hours} hr read</span>
             )}
-            {book.language && <span>{LANGUAGES[book.language] ?? book.language}</span>}
+            {book.language && (
+              <span>{LANGUAGES[book.language] ?? book.language}</span>
+            )}
           </div>
 
-          {/* Action row — Phase 2 will enable Read & Listen */}
+          {/* Action row */}
           <div className="mt-7 flex flex-wrap items-center gap-3">
-            <button
-              disabled
-              title="In-app reader arrives in Phase 2"
-              className="inline-flex cursor-not-allowed items-center gap-2 rounded-sm border border-ink-500/30 bg-parchment-100 px-4 py-2 text-sm text-ink-500"
-            >
-              <BookOpen size={14} />
-              Read inside (Phase 2)
-            </button>
-            {book.audio_summary_url && (
-              <button
-                disabled
-                className="inline-flex cursor-not-allowed items-center gap-2 rounded-sm border border-ink-500/30 px-4 py-2 text-sm text-ink-500"
+            {hasReadable && (
+              <Link
+                href={`/book/${book.id}/read${book.pdf_url ? "?mode=pdf" : "?mode=epub"}`}
               >
-                <Headphones size={14} />
-                Listen (Phase 2)
-              </button>
+                <Button variant="primary">
+                  <BookOpen size={14} />
+                  {progress?.current_page || progress?.current_cfi
+                    ? "Resume reading"
+                    : "Read inside"}
+                </Button>
+              </Link>
+            )}
+            {hasAudio && (
+              <Link href={`/book/${book.id}/read?mode=audio`}>
+                <Button variant="outline">
+                  <Headphones size={14} />
+                  {progress?.current_audio_seconds ? "Resume audio" : "Listen"}
+                </Button>
+              </Link>
+            )}
+            {book.pdf_url && (
+              <a
+                href={downloadUrl(
+                  book.pdf_url,
+                  `${book.title.replace(/[^\w]+/g, "_")}.pdf`,
+                )}
+                className="inline-flex items-center gap-1.5 rounded-sm px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
+              >
+                <Download size={13} />
+                PDF
+              </a>
+            )}
+            {book.epub_url && (
+              <a
+                href={downloadUrl(
+                  book.epub_url,
+                  `${book.title.replace(/[^\w]+/g, "_")}.epub`,
+                )}
+                className="inline-flex items-center gap-1.5 rounded-sm px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
+              >
+                <Download size={13} />
+                EPUB
+              </a>
             )}
             {book.amazon_url && (
               <a
                 href={book.amazon_url}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
+                className="inline-flex items-center gap-1.5 px-2 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
               >
                 <ExternalLink size={13} />
                 Amazon
-              </a>
-            )}
-            {book.external_url && (
-              <a
-                href={book.external_url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
-              >
-                <ExternalLink size={13} />
-                External
               </a>
             )}
             {isAdmin && (
@@ -290,6 +390,21 @@ function BookDetailContent() {
           </dl>
         </div>
       </section>
+
+      {/* Finish modal */}
+      <FinishModal
+        open={showFinish}
+        onClose={() => {
+          setShowFinish(false);
+          if (search.get("finish")) router.replace(`/book/${bookId}`);
+        }}
+        existing={progress}
+        onSubmit={async (rating, notes) => {
+          if (!firebaseUser || !bookId) return;
+          await setStatus(firebaseUser.uid, bookId, "finished");
+          await setRatingAndNotes(firebaseUser.uid, bookId, rating, notes);
+        }}
+      />
     </main>
   );
 }
@@ -308,5 +423,131 @@ function ClassRow({
       <p className="mb-1.5 text-[0.7rem] text-ink-500">{label}</p>
       <div className="flex flex-wrap gap-1.5">{children}</div>
     </div>
+  );
+}
+
+function ShelfBtn({
+  label,
+  icon,
+  active,
+  onClick,
+  tone = "neutral",
+}: {
+  label: string;
+  icon: React.ReactNode;
+  active?: boolean;
+  onClick: () => void;
+  tone?: "neutral" | "forest";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "flex items-center justify-center gap-1.5 rounded-sm border px-2 py-1.5 text-xs transition-colors " +
+        (active
+          ? tone === "forest"
+            ? "border-forest-600/50 bg-forest-50 text-forest-600"
+            : "border-oxblood-600/50 bg-oxblood-50 text-oxblood-700"
+          : "border-ink-500/25 bg-parchment-50 text-ink-700 hover:bg-parchment-100")
+      }
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function FinishModal({
+  open,
+  onClose,
+  existing,
+  onSubmit,
+}: {
+  open: boolean;
+  onClose: () => void;
+  existing: ReadingProgressDoc | null;
+  onSubmit: (rating: number | null, notes: string | null) => Promise<void>;
+}) {
+  const [rating, setRating] = useState<number | null>(existing?.rating ?? null);
+  const [notes, setNotes] = useState<string>(existing?.notes ?? "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setRating(existing?.rating ?? null);
+      setNotes(existing?.notes ?? "");
+    }
+  }, [open, existing]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await onSubmit(rating, notes.trim() || null);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Close the book">
+      <div className="space-y-5">
+        <p className="text-sm text-ink-700">
+          You've finished this book. Leave a rating and a brief closing note for
+          your future self.
+        </p>
+
+        <div>
+          <p className="mb-2 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+            Rating (optional)
+          </p>
+          <div className="flex items-center gap-1">
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setRating(rating === n ? null : n)}
+                className="p-1 text-gold-500 hover:text-gold-600"
+                aria-label={`${n} stars`}
+              >
+                <Star
+                  size={22}
+                  fill={rating && n <= rating ? "currentColor" : "transparent"}
+                  className={rating && n <= rating ? "" : "opacity-40"}
+                />
+              </button>
+            ))}
+            {rating !== null && (
+              <button
+                type="button"
+                onClick={() => setRating(null)}
+                className="ml-2 text-ink-500 hover:text-ink-900"
+                aria-label="Clear rating"
+              >
+                <XIcon size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <Textarea
+          label="Closing note"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={4}
+          placeholder="What did this book change in you?"
+        />
+
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Mark finished"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

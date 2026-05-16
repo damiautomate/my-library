@@ -2,19 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { v2 as cloudinary } from "cloudinary";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
 
-// Admin SDK at request time only — never statically render.
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type ResourceType = "image" | "raw" | "video";
-
-interface SignRequestBody {
-  folder?: string;        // e.g. "my-library/books/{bookId}/pdf"
-  public_id?: string;     // e.g. "{bookId}-pdf"
-  resource_type?: ResourceType;
+interface DeleteBody {
+  public_id: string;
+  resource_type?: "image" | "raw" | "video";
 }
 
-/** Validate admin and return UID, or NextResponse on failure. */
 async function requireAdmin(
   req: NextRequest,
 ): Promise<{ uid: string } | NextResponse> {
@@ -24,15 +19,14 @@ async function requireAdmin(
     : null;
   if (!idToken)
     return NextResponse.json({ error: "Missing auth token" }, { status: 401 });
-
   let decoded;
   try {
     decoded = await adminAuth.verifyIdToken(idToken);
   } catch {
     return NextResponse.json({ error: "Invalid auth token" }, { status: 401 });
   }
-  const userSnap = await adminDb.collection("users").doc(decoded.uid).get();
-  if (!userSnap.exists || userSnap.data()?.role !== "admin") {
+  const u = await adminDb.collection("users").doc(decoded.uid).get();
+  if (!u.exists || u.data()?.role !== "admin") {
     return NextResponse.json({ error: "Admin only" }, { status: 403 });
   }
   return { uid: decoded.uid };
@@ -45,33 +39,22 @@ export async function POST(req: NextRequest) {
   const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
-
   if (!cloudName || !apiKey || !apiSecret) {
     return NextResponse.json(
-      { error: "Cloudinary credentials missing on server" },
+      { error: "Cloudinary credentials missing" },
       { status: 500 },
     );
   }
 
-  let body: SignRequestBody;
+  let body: DeleteBody;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-
-  const folder = (body.folder ?? "my-library").trim();
-  const publicId = body.public_id?.trim();
-  const resourceType: ResourceType = body.resource_type ?? "image";
-
-  // Build the params Cloudinary will sign. Cloudinary signs everything that
-  // affects the upload outcome; keep this list minimal and deterministic.
-  const timestamp = Math.floor(Date.now() / 1000);
-  const paramsToSign: Record<string, string | number> = {
-    folder,
-    timestamp,
-  };
-  if (publicId) paramsToSign.public_id = publicId;
+  if (!body.public_id) {
+    return NextResponse.json({ error: "Missing public_id" }, { status: 400 });
+  }
 
   cloudinary.config({
     cloud_name: cloudName,
@@ -79,19 +62,14 @@ export async function POST(req: NextRequest) {
     api_secret: apiSecret,
   });
 
-  const signature = cloudinary.utils.api_sign_request(
-    paramsToSign,
-    apiSecret,
-  );
-
-  return NextResponse.json({
-    signature,
-    timestamp,
-    api_key: apiKey,
-    cloud_name: cloudName,
-    folder,
-    public_id: publicId,
-    resource_type: resourceType,
-    upload_url: `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`,
-  });
+  try {
+    const result = await cloudinary.uploader.destroy(body.public_id, {
+      resource_type: body.resource_type ?? "image",
+      invalidate: true,
+    });
+    return NextResponse.json({ ok: true, result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Delete failed";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }
