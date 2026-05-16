@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Library, LogOut, Settings, User as UserIcon } from "lucide-react";
+import {
+  Library,
+  LogOut,
+  Search as SearchIcon,
+  Settings,
+  User as UserIcon,
+} from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { signOutUser } from "@/lib/firebase/auth";
 
@@ -44,6 +50,19 @@ export function Header() {
                 className="px-3 py-1.5 text-ink-700 hover:text-ink-900"
               >
                 Browse
+              </Link>
+              <Link
+                href="/library/shelf"
+                className="px-3 py-1.5 text-ink-700 hover:text-ink-900"
+              >
+                My Shelf
+              </Link>
+              <Link
+                href="/library/search"
+                className="rounded-sm p-1.5 text-ink-700 hover:bg-parchment-100 hover:text-ink-900"
+                aria-label="Search"
+              >
+                <SearchIcon size={14} />
               </Link>
               {isAdmin && (
                 <Link

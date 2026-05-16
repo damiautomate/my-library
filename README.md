@@ -1,142 +1,113 @@
-# My Library — App 1 (Phases 1 + 2)
+# My Library — App 1 (Phases 1 + 2 + 3)
 
 > A curated, invite-only digital library. Books classified across 26 life
 > domains, 7 stages, 11 rooms. The storage and organisation foundation for
 > a future Library Keeper (App 2).
 
-**Phase 2 status: ✅ built** — file uploads, in-app readers, reading progress,
-shelf controls, and downloads are all live.
+**Phase 3 status: ✅ built** — ISBN auto-fill, library-wide search, the My Shelf
+page, per-book notes, and basic highlight capture from both readers.
 
 ## What works now
 
 **From Phase 1**
-- Next.js 14 + TypeScript + Tailwind
-- Firebase Auth + Firestore + security rules
-- Invitation allowlist enforced server-side
-- Full taxonomy (26 domains, 7 stages, 11 rooms, etc.)
-- Admin book CRUD with full classification
-- Rooms grid, browse with multi-facet filters, room pages, book detail
-- Design system: parchment / ink / oxblood / forest, Fraunces + IBM Plex Sans, paper grain
+- Next.js 14 + TypeScript + Tailwind, design system, taxonomy
+- Firebase Auth with invite allowlist; Firestore + security rules
+- Admin book CRUD; rooms grid; browse with facet filters; book detail
 
-**New in Phase 2**
-- Signed Cloudinary uploads (PDF, EPUB, audio, cover) directly from the admin form
-- Drag-and-drop `FileUploader` with live progress %, cancellation, replace, delete
-- In-app **PDF reader** (`react-pdf`) — page navigation, zoom, keyboard arrows
-- In-app **EPUB reader** (`react-reader`) — typography matched to the library, CFI persistence
-- In-app **audio player** — scrub, ±15s skip, position persistence
-- **Reading progress** auto-saved with debouncing + every 10s heartbeat
-- **Auto-status transitions** — first save → currently_reading; ≥95% → "mark as finished?" nudge
-- **Shelf controls** on book detail: want to read / currently reading / pause / finish
-- **Mark-as-finished modal** with optional 5-star rating + closing note
-- **Download buttons** that force `Content-Disposition: attachment` via Cloudinary's `fl_attachment` flag
-- **Multi-mode reader** at `/book/[bookId]/read?mode=pdf|epub|audio` (switches between modes when multiple formats exist)
-- Login page error messages are now human-readable (no more silent "Error")
+**From Phase 2**
+- Signed Cloudinary uploads (PDF, EPUB, audio, cover) with progress bars
+- In-app PDF, EPUB, and audio readers with debounced progress saves
+- Auto-status transitions; "mark as finished" rating + closing-note modal
+- Download buttons; humanized auth errors
+
+**New in Phase 3**
+- **ISBN auto-fill** — admin paste an ISBN, click *Auto-fill*, and the form is populated from Google Books (with Open Library fallback)
+- **Library search** at `/library/search?q=…` — token-based ranked search across title, subtitle, authors, description
+- **Header search shortcut** — always-on magnifying glass in the nav
+- **My Shelf** at `/library/shelf` — status tabs (currently reading, want to read, finished, paused, abandoned), stats row (incl. "Finished in {year}"), live-updating book grids per tab
+- **Reader's Notes** — private free-form notes per book, debounced auto-save
+- **Highlight capture** in both readers:
+  - PDF: select text → floating "Save highlight" pill → stored with page number
+  - EPUB: select text → top-of-reader prompt → stored with CFI
+- **Highlights gallery** on the book detail page with date stamps and remove-on-hover
 
 ## What's still ahead
 
-- **Phase 3** — ISBN auto-fetch, `/library/search`, **My Shelf** page, notes, highlights
-- **Phase 4** — Reader's Passport stats, atmospheric polish, mobile pass
+- **Phase 4** — Reader's Passport stats page, atmospheric polish for the rooms grid, mobile pass, role management
 
 ---
 
-## Online-only setup (since you're working in the browser)
+## Online-only deploy (same workflow as Phase 2)
 
-These steps assume you already deployed Phase 1 successfully. If not, follow
-Phase 1's bootstrap flow first.
+### 1. Pull Phase 3 into your Codespace
 
-### 1. Pull Phase 2 into your repo via Codespaces
-
-1. Go to your `my-library` GitHub repo → green **Code** button → **Codespaces** tab → **Create codespace on main**.
-2. Drag the `my-library-phase2.zip` into the file explorer (left panel).
-3. In the terminal:
+1. Open your `my-library` repo on GitHub → green **Code** → **Codespaces** → **Create codespace on main** (or reopen an existing one).
+2. Drag the `my-library-phase3.zip` into the file explorer.
+3. Terminal:
    ```bash
-   # Backup .env.local.example & .gitignore in case there are differences
-   unzip -o my-library-phase2.zip -d /tmp/p2
-   # Overwrite working tree with Phase 2 (preserves your git history)
-   cp -r /tmp/p2/my-library/. .
-   rm my-library-phase2.zip
+   unzip -o my-library-phase3.zip -d /tmp/p3
+   cp -r /tmp/p3/my-library/. .
+   rm my-library-phase3.zip
    git add -A
-   git commit -m "Phase 2: file uploads, readers, reading progress"
+   git commit -m "Phase 3: ISBN auto-fill, search, My Shelf, notes, highlights"
    git push
    ```
 4. Vercel auto-deploys on push. Wait ~2 minutes.
 
-### 2. Confirm Cloudinary env vars are set in Vercel
+### 2. No new environment variables needed
 
-Vercel → your project → **Settings** → **Environment Variables**. You should already have these from Phase 1 setup, but verify:
+Phase 3 reuses everything already set up. Google Books and Open Library are public APIs with no key required.
 
-- `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME` = `dvzk1it71`
-- `CLOUDINARY_API_KEY` = (from Cloudinary dashboard)
-- `CLOUDINARY_API_SECRET` = (from Cloudinary dashboard)
-- `CLOUDINARY_FOLDER` = `my-library`
+### 3. No Firestore rule changes needed
 
-If any are missing, add them and trigger a redeploy (Deployments tab → ⋯ on the latest → **Redeploy**).
-
-### 3. (Optional) Configure Cloudinary access controls
-
-By default, uploaded files are public — anyone with the URL can read them. The
-app guards the URL behind Firestore security rules (members must read the book
-doc to discover the URL), so this is acceptable for App 1. If you want
-something stricter in App 2, look up Cloudinary's **signed delivery URLs**.
-
-### 4. No Firestore rule changes needed
-
-The Phase 1 rules already cover `reading_progress` correctly. Members can only
-write to their own progress docs (the rule `progressId.matches(request.auth.uid + "_.*")`
-enforces this).
+The Phase 1 rules already grant members write access to their own
+`reading_progress` doc (notes + highlights are fields on that doc, so they're
+covered automatically).
 
 ---
 
-## Testing Phase 2
+## Testing Phase 3
 
-In a deployed environment:
-
-1. Sign in as admin → `/admin/books/new`.
-2. Pick a small public-domain PDF for a smoke test (Project Gutenberg has plenty).
-3. Drop it on the PDF uploader; you should see a live progress bar.
-4. Fill in title, authors, pick a Room, then click **Save book & publish**.
-5. Go to `/book/<id>`. Click **Read inside**. The PDF should render.
-6. Page-forward a few pages. Close the tab. Reopen `/book/<id>` — the page count is preserved, and **Resume reading** is now the primary action.
-7. Try downloading the PDF via the **PDF** download link — Cloudinary should serve it with `Content-Disposition: attachment`.
-8. Try Shelf actions (Want to read / Pause). Then go past 95% in the reader → the "Mark as finished?" banner should appear.
+1. **ISBN auto-fill** — `/admin/books/new` → paste `9780735211292` (Atomic Habits) → click *Auto-fill*. Title, authors, publisher, year, page count, description, language, and cover should pre-populate. Now type a custom subtitle; auto-fill won't overwrite it on a second lookup.
+2. **Search** — Magnifying glass in the header. Try a partial author name or a word from a description. Results sort by relevance (title hits beat description hits).
+3. **My Shelf** — *My Shelf* in the header. Start a book in the reader, then come back here — it should appear under *Currently reading*. Mark another as *Want to read* from its detail page; check *Want to read* tab.
+4. **Notes** — Book detail → *Reader's notes* section → type. After ~800 ms it shows *Saved · HH:MM:SS*. Reload — the notes persist.
+5. **Highlights — PDF** — Open a PDF book. Select 5+ characters of text. A floating *Save highlight* pill appears. Click it. A toast confirms. Back on the book's detail page, your highlight appears with the page number under *Highlights*.
+6. **Highlights — EPUB** — Same flow, but the prompt appears at the top of the reader (EPUB iframes block per-page positioning).
+7. **Remove a highlight** — Detail page → hover a highlight → small × in the corner.
 
 ---
 
-## File map (new in Phase 2)
+## What's new on disk (Phase 3)
 
 ```
 src/
 ├── app/
-│   ├── api/upload/
-│   │   ├── sign/route.ts          ★ Real signed-upload endpoint
-│   │   └── delete/route.ts        ★ Admin-only file deletion
-│   └── book/[bookId]/
-│       ├── page.tsx               ↻ Now with Read/Resume/Listen + shelf + finish modal
-│       └── read/page.tsx          ★ Multi-mode reader route
+│   ├── api/books/fetch-isbn/route.ts   ★ Real ISBN lookup (Google Books → Open Library)
+│   ├── library/
+│   │   ├── search/page.tsx             ★ /library/search?q=…
+│   │   └── shelf/page.tsx              ★ /library/shelf
+│   └── book/[bookId]/page.tsx          ↻ Reader's notes + highlights gallery
 ├── components/
-│   ├── admin/
-│   │   ├── BookForm.tsx           ↻ Files section added
-│   │   └── FileUploader.tsx       ★ Drag-and-drop with progress + replace + delete
-│   ├── readers/
-│   │   ├── PDFReader.tsx          ★ react-pdf, page-by-page, debounced progress
-│   │   ├── EPUBReader.tsx         ★ react-reader, CFI-based progress
-│   │   └── AudioPlayer.tsx        ★ HTML5 audio with scrub, skip, position persistence
-│   └── library/
-│       └── ReadingProgress.tsx    ★ Status pill + percent bar
+│   ├── admin/BookForm.tsx              ↻ IsbnFetcher replaces the two ISBN inputs
+│   ├── library/Header.tsx              ↻ Search icon + My Shelf link
+│   └── readers/
+│       ├── PDFReader.tsx               ↻ Selection-based highlight capture
+│       └── EPUBReader.tsx              ↻ Selection-based highlight capture
 └── lib/
-    ├── cloudinary.ts              ★ Client-side upload helper + download URL builder
-    └── progress.ts                ★ Reading progress CRUD with debounced saver
+    └── progress.ts                     ↻ listUserProgress, watchUserProgress,
+                                         saveNotes, addHighlight, removeHighlight
 ```
 
-★ = new in Phase 2
+★ = new in Phase 3
 ↻ = modified
 
 ---
 
-## Common Phase 2 snags
+## Common Phase 3 snags
 
-- **Upload fails with 401** — your ID token expired. Refresh the page and try again.
-- **Upload fails with 500 "Cloudinary credentials missing"** — env vars not set in Vercel. See step 2 above.
-- **PDF reader shows "Could not load this PDF"** — usually a CORS issue from your Cloudinary account having a restrictive delivery rule. Cloudinary's defaults are permissive, so this only happens if you've added custom rules. The PDF URL itself should still work in a new tab.
-- **EPUB reader shows blank** — same as above; also check the file is a valid EPUB 2 or 3 zip.
-- **"Mark as finished" banner doesn't appear** — only triggers at ≥95% progress. For audio, the percent only updates after a few seconds of playback because metadata has to load first.
+- **ISBN lookup returns 404** — some books legitimately aren't in either database. Type the metadata in manually; it doesn't block anything.
+- **EPUB highlight prompt doesn't appear** — selections inside the iframe sometimes don't fire `selected` on the first try; release and re-select, or select a slightly longer span. Once you've highlighted once in a session it works reliably.
+- **Highlight saved but doesn't show on the detail page** — the page subscribes to live progress updates but if you have two tabs open they each subscribe; if it doesn't appear immediately, reload.
+- **My Shelf shows empty under "Currently reading" after opening a book** — the auto-status transition only fires after the first debounced save (1.5s after opening). Turn one page or wait a few seconds.
+- **Search shows nothing for a word that's clearly in a book** — the search only matches *visible* fields (title, subtitle, authors, description). Classification labels aren't searchable yet; use the Browse filters instead.

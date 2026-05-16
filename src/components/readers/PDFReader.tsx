@@ -4,8 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Loader2 } from "lucide-react";
-import { makeDebouncedSaver } from "@/lib/progress";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Highlighter,
+  Loader2,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
 
 // Worker is served from a CDN at the exact version react-pdf bundles.
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
@@ -102,8 +109,60 @@ export function PDFReader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [numPages]);
 
+  // ---- Highlight capture ------------------------------------------------
+  const [selection, setSelection] = useState<{
+    text: string;
+    rect: DOMRect;
+  } | null>(null);
+  const [savedToast, setSavedToast] = useState(false);
+  const pageContainerRef = useRef<HTMLDivElement>(null);
+
+  // Detect text selection inside the page container
+  useEffect(() => {
+    function handleSelection() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        setSelection(null);
+        return;
+      }
+      const text = sel.toString().trim();
+      if (!text || text.length < 2) {
+        setSelection(null);
+        return;
+      }
+      // Only handle selections inside the page container
+      const node = sel.anchorNode;
+      if (!node || !pageContainerRef.current?.contains(node)) {
+        setSelection(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      setSelection({ text, rect });
+    }
+    document.addEventListener("selectionchange", handleSelection);
+    return () => document.removeEventListener("selectionchange", handleSelection);
+  }, []);
+
+  async function captureHighlight() {
+    if (!selection) return;
+    try {
+      await addHighlight(userId, bookId, {
+        page,
+        text: selection.text,
+        color: "yellow",
+      });
+      setSavedToast(true);
+      setTimeout(() => setSavedToast(false), 1800);
+      window.getSelection()?.removeAllRanges();
+      setSelection(null);
+    } catch (err) {
+      console.error("[pdf] saveHighlight failed", err);
+    }
+  }
+
   return (
-    <div ref={containerRef} className="flex flex-col items-center">
+    <div ref={containerRef} className="relative flex flex-col items-center">
       {/* Toolbar */}
       <div className="sticky top-0 z-10 mb-3 flex w-full items-center justify-center gap-3 border-b ml-hairline bg-parchment-50/95 px-4 py-2 backdrop-blur-sm">
         <button
@@ -149,34 +208,69 @@ export function PDFReader({
         </button>
       </div>
 
-      <Document
-        file={url}
-        onLoadSuccess={handleLoadSuccess}
-        loading={
-          <div className="flex flex-col items-center gap-2 py-16 text-ink-500">
-            <Loader2 className="animate-spin" />
-            <p className="font-mono text-[0.65rem] uppercase tracking-[0.2em]">
-              Loading document…
-            </p>
-          </div>
-        }
-        error={
-          <div className="py-16 text-center text-oxblood-700">
-            <p className="font-display text-lg">Could not load this PDF.</p>
-            <p className="mt-2 text-sm text-ink-600">
-              The file may be missing or corrupted.
-            </p>
-          </div>
-        }
-        className="shadow-paper-lg"
-      >
-        <Page
-          pageNumber={page}
-          width={width * scale}
-          renderTextLayer
-          renderAnnotationLayer
-        />
-      </Document>
+      {/* Floating selection action */}
+      {selection && (
+        <div
+          className="fixed z-20"
+          style={{
+            top: Math.max(80, selection.rect.top - 44),
+            left: Math.min(
+              window.innerWidth - 160,
+              selection.rect.left + selection.rect.width / 2 - 70,
+            ),
+          }}
+        >
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              // Prevent selection clear before click fires
+              e.preventDefault();
+            }}
+            onClick={captureHighlight}
+            className="inline-flex items-center gap-1.5 rounded-sm border border-gold-500 bg-parchment-50 px-3 py-1.5 text-xs font-medium text-ink-900 shadow-paper-lg hover:bg-parchment-100"
+          >
+            <Highlighter size={12} className="text-gold-600" />
+            Save highlight
+          </button>
+        </div>
+      )}
+
+      {savedToast && (
+        <div className="fixed bottom-6 left-1/2 z-30 -translate-x-1/2 rounded-sm border border-forest-600/40 bg-forest-50 px-4 py-2 text-sm text-forest-600 shadow-paper-lg">
+          ✓ Highlight saved
+        </div>
+      )}
+
+      <div ref={pageContainerRef}>
+        <Document
+          file={url}
+          onLoadSuccess={handleLoadSuccess}
+          loading={
+            <div className="flex flex-col items-center gap-2 py-16 text-ink-500">
+              <Loader2 className="animate-spin" />
+              <p className="font-mono text-[0.65rem] uppercase tracking-[0.2em]">
+                Loading document…
+              </p>
+            </div>
+          }
+          error={
+            <div className="py-16 text-center text-oxblood-700">
+              <p className="font-display text-lg">Could not load this PDF.</p>
+              <p className="mt-2 text-sm text-ink-600">
+                The file may be missing or corrupted.
+              </p>
+            </div>
+          }
+          className="shadow-paper-lg"
+        >
+          <Page
+            pageNumber={page}
+            width={width * scale}
+            renderTextLayer
+            renderAnnotationLayer
+          />
+        </Document>
+      </div>
     </div>
   );
 }

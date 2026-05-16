@@ -10,53 +10,44 @@ export const runtime = "nodejs";
 /**
  * POST /api/users/onboard
  *
- * Called after a successful Firebase Auth signup/signin. Validates the email
- * against the `invitations` allowlist. If accepted, creates users/{uid} and
- * marks the invitation accepted. If rejected, deletes the orphan auth user.
+ * Called by the client immediately after a successful Firebase Auth signup
+ * (email/password OR Google). Validates the user's email against the
+ * `invitations` allowlist:
+ *
+ *   - if a matching `pending` invitation exists:
+ *       * creates users/{uid} with the invited role
+ *       * marks the invitation `accepted`
+ *       * returns 200 { role }
+ *
+ *   - if no invitation exists:
+ *       * deletes the just-created auth user
+ *       * returns 403
+ *
+ * Auth: requires a Bearer ID token from the just-signed-up user.
  */
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("authorization") ?? "";
   const idToken = authHeader.startsWith("Bearer ")
     ? authHeader.slice("Bearer ".length)
     : null;
-
   if (!idToken) {
-    console.warn("[onboard] No Bearer token in Authorization header");
     return NextResponse.json({ error: "Missing auth token" }, { status: 401 });
   }
 
   let decoded;
   try {
     decoded = await adminAuth.verifyIdToken(idToken);
-  } catch (err) {
-    // Log the real reason so Vercel's function logs show what's wrong.
-    const msg = err instanceof Error ? err.message : String(err);
-    const code = (err as { code?: string })?.code ?? "no-code";
-    console.error("[onboard] verifyIdToken FAILED", {
-      code,
-      message: msg,
-      adminProjectId: process.env.FIREBASE_ADMIN_PROJECT_ID,
-      clientEmailSuffix:
-        process.env.FIREBASE_ADMIN_CLIENT_EMAIL?.split("@")[1] ?? "missing",
-      privateKeyPresent: !!process.env.FIREBASE_ADMIN_PRIVATE_KEY,
-      privateKeyStartsWithBegin:
-        process.env.FIREBASE_ADMIN_PRIVATE_KEY?.includes("BEGIN PRIVATE KEY") ??
-        false,
-    });
-    return NextResponse.json(
-      { error: `Invalid auth token: ${msg}` },
-      { status: 401 },
-    );
+  } catch {
+    return NextResponse.json({ error: "Invalid auth token" }, { status: 401 });
   }
-
   const uid = decoded.uid;
   const email = (decoded.email ?? "").toLowerCase();
   if (!email) {
-    console.warn("[onboard] No email on decoded token", { uid });
     return NextResponse.json({ error: "No email on token" }, { status: 400 });
   }
 
-  // Returning user — just touch last_active_at
+  // If the user already has a users doc, this is a returning user. Just touch
+  // last_active_at and return their role.
   const userRef = adminDb.collection("users").doc(uid);
   const existing = await userRef.get();
   if (existing.exists) {
@@ -65,7 +56,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ role });
   }
 
-  // Look up a pending invitation for this email
+  // Look up a pending invitation for this email.
   const inviteSnap = await adminDb
     .collection("invitations")
     .where("email", "==", email)
@@ -74,14 +65,11 @@ export async function POST(req: NextRequest) {
     .get();
 
   if (inviteSnap.empty) {
-    console.info("[onboard] No pending invitation; deleting orphan auth user", {
-      email,
-      uid,
-    });
+    // No invitation — revoke this auth account and reject.
     try {
       await adminAuth.deleteUser(uid);
-    } catch (e) {
-      console.warn("[onboard] deleteUser cleanup failed (non-fatal)", e);
+    } catch {
+      // best-effort cleanup; ignore failures
     }
     return NextResponse.json(
       {
@@ -98,6 +86,7 @@ export async function POST(req: NextRequest) {
     role: "admin" | "member";
   };
 
+  // Create users doc
   await userRef.set({
     uid,
     email,
@@ -113,11 +102,11 @@ export async function POST(req: NextRequest) {
     last_active_at: FieldValue.serverTimestamp(),
   });
 
+  // Mark invitation accepted
   await invite.ref.update({
     status: "accepted",
     accepted_at: FieldValue.serverTimestamp(),
   });
 
-  console.info("[onboard] Accepted invitation", { email, role: inviteData.role });
   return NextResponse.json({ role: inviteData.role });
 }

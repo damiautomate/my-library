@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Search as SearchIcon, Sparkles } from "lucide-react";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
@@ -11,6 +12,7 @@ import {
   type ClassificationValue,
 } from "./ClassificationPicker";
 import { LANGUAGES } from "@/lib/taxonomy";
+import { auth as firebaseAuth } from "@/lib/firebase/client";
 import type { Book, BookDoc, BookStatus } from "@/lib/types";
 
 export interface BookFormValue extends ClassificationValue {
@@ -253,18 +255,9 @@ export function BookForm({
               rows={4}
             />
           </div>
-          <Input
-            label="ISBN-13"
-            value={value.isbn_13}
-            onChange={(e) => set("isbn_13", e.target.value)}
-            placeholder="9780735211292"
-          />
-          <Input
-            label="ISBN-10"
-            value={value.isbn_10}
-            onChange={(e) => set("isbn_10", e.target.value)}
-            placeholder="0735211299"
-          />
+          <div className="md:col-span-2">
+            <IsbnFetcher value={value} onChange={onChange} />
+          </div>
           <Input
             label="Publisher"
             value={value.publisher}
@@ -474,6 +467,131 @@ export function BookForm({
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// IsbnFetcher — small inline helper that calls /api/books/fetch-isbn and
+// merges the result into the BookFormValue. Empty existing fields are filled
+// in; non-empty fields are preserved.
+// ----------------------------------------------------------------------------
+
+function IsbnFetcher({
+  value,
+  onChange,
+}: {
+  value: BookFormValue;
+  onChange: (next: BookFormValue) => void;
+}) {
+  const [isbn, setIsbn] = useState(value.isbn_13 || value.isbn_10 || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [source, setSource] = useState<string | null>(null);
+
+  async function fetchIt() {
+    setErr(null);
+    setSource(null);
+    const clean = isbn.replace(/[^0-9Xx]/g, "");
+    if (clean.length !== 10 && clean.length !== 13) {
+      setErr("ISBN must be 10 or 13 digits.");
+      return;
+    }
+    const u = firebaseAuth.currentUser;
+    if (!u) {
+      setErr("Not signed in");
+      return;
+    }
+    setBusy(true);
+    try {
+      const token = await u.getIdToken();
+      const res = await fetch("/api/books/fetch-isbn", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ isbn: clean }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setErr(data.error ?? "Lookup failed");
+        return;
+      }
+      setSource(data.source);
+      // Merge: empty fields get filled; existing values are preserved
+      onChange({
+        ...value,
+        title: value.title || data.title || "",
+        subtitle: value.subtitle || data.subtitle || "",
+        authors:
+          value.authors ||
+          (Array.isArray(data.authors) ? data.authors.join(", ") : ""),
+        description: value.description || data.description || "",
+        publisher: value.publisher || data.publisher || "",
+        publication_year:
+          value.publication_year ||
+          (data.publication_year ? String(data.publication_year) : ""),
+        page_count:
+          value.page_count ||
+          (data.page_count ? String(data.page_count) : ""),
+        language: value.language || data.language || "en",
+        isbn_10: value.isbn_10 || data.isbn_10 || (clean.length === 10 ? clean : ""),
+        isbn_13: value.isbn_13 || data.isbn_13 || (clean.length === 13 ? clean : ""),
+        cover_url: value.cover_url || data.cover_url || "",
+      });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Lookup failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-sm border border-ink-500/25 bg-parchment-100/40 p-4">
+      <div className="flex items-baseline justify-between">
+        <label className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-700">
+          ISBN — auto-fill from Google Books / Open Library
+        </label>
+        {source && (
+          <span className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-600">
+            ✓ via {source.replace("_", " ")}
+          </span>
+        )}
+      </div>
+      <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-stretch">
+        <div className="relative flex-1">
+          <SearchIcon
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-500"
+          />
+          <input
+            value={isbn}
+            onChange={(e) => setIsbn(e.target.value)}
+            placeholder="9780735211292"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void fetchIt();
+              }
+            }}
+            className="w-full rounded-sm border border-ink-500/25 bg-parchment-50 py-2 pl-9 pr-3 text-sm placeholder:text-ink-500/70 focus:border-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-700/20"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => void fetchIt()}
+          disabled={busy || !isbn.trim()}
+          className="inline-flex items-center justify-center gap-1.5 rounded-sm border border-oxblood-700 bg-oxblood-600 px-4 py-2 text-sm font-medium text-parchment-50 transition-colors hover:bg-oxblood-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Sparkles size={13} />
+          {busy ? "Looking up…" : "Auto-fill"}
+        </button>
+      </div>
+      {err && <p className="mt-2 text-xs text-oxblood-700">{err}</p>}
+      <p className="mt-2 text-[0.7rem] text-ink-500">
+        Tip: empty fields will be filled in. Anything you've already typed is left alone.
+      </p>
     </div>
   );
 }

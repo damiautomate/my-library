@@ -1,13 +1,20 @@
 import {
+  arrayRemove,
+  arrayUnion,
+  collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
+  query,
   serverTimestamp,
   setDoc,
+  Timestamp,
   Unsubscribe,
+  where,
 } from "firebase/firestore";
 import { db } from "./firebase/client";
-import type { ReadingProgressDoc, ReadingStatus } from "./types";
+import type { Highlight, ReadingProgressDoc, ReadingStatus } from "./types";
 
 const COL = "reading_progress";
 
@@ -166,4 +173,101 @@ export function makeDebouncedSaver(
       }
     },
   };
+}
+
+// ----------------------------------------------------------------------------
+// List + highlights + notes
+// ----------------------------------------------------------------------------
+
+/** All progress docs for one user. Used by My Shelf. */
+export async function listUserProgress(
+  userId: string,
+): Promise<ReadingProgressDoc[]> {
+  const snap = await getDocs(
+    query(collection(db, COL), where("user_id", "==", userId)),
+  );
+  return snap.docs.map((d) => d.data() as ReadingProgressDoc);
+}
+
+/** Subscribe to all of a user's progress docs (live updates for the shelf). */
+export function watchUserProgress(
+  userId: string,
+  cb: (docs: ReadingProgressDoc[]) => void,
+): Unsubscribe {
+  return onSnapshot(
+    query(collection(db, COL), where("user_id", "==", userId)),
+    (snap) => cb(snap.docs.map((d) => d.data() as ReadingProgressDoc)),
+  );
+}
+
+/** Save the free-form notes field. Debounced caller recommended. */
+export async function saveNotes(
+  userId: string,
+  bookId: string,
+  notes: string,
+): Promise<void> {
+  await setDoc(
+    doc(db, COL, `${userId}_${bookId}`),
+    {
+      user_id: userId,
+      book_id: bookId,
+      notes,
+      last_read_at: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+/** A small id helper for highlights — short, sortable, no extra deps. */
+function highlightId(): string {
+  return `h_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export interface NewHighlight {
+  page?: number;
+  cfi?: string;
+  text: string;
+  note?: string;
+  color?: Highlight["color"];
+}
+
+export async function addHighlight(
+  userId: string,
+  bookId: string,
+  h: NewHighlight,
+): Promise<Highlight> {
+  const newH: Highlight = {
+    id: highlightId(),
+    page: h.page,
+    cfi: h.cfi,
+    text: h.text,
+    note: h.note,
+    color: h.color ?? "yellow",
+    created_at: Timestamp.now(),
+  };
+  await setDoc(
+    doc(db, COL, `${userId}_${bookId}`),
+    {
+      user_id: userId,
+      book_id: bookId,
+      highlights: arrayUnion(newH),
+      last_read_at: serverTimestamp(),
+    },
+    { merge: true },
+  );
+  return newH;
+}
+
+export async function removeHighlight(
+  userId: string,
+  bookId: string,
+  highlight: Highlight,
+): Promise<void> {
+  await setDoc(
+    doc(db, COL, `${userId}_${bookId}`),
+    {
+      highlights: arrayRemove(highlight),
+    },
+    { merge: true },
+  );
 }

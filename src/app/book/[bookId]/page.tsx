@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams, notFound } from "next/navigation";
 import Link from "next/link";
 import {
@@ -30,6 +30,8 @@ import {
   setStatus,
   setRatingAndNotes,
   watchProgress,
+  saveNotes,
+  removeHighlight,
 } from "@/lib/progress";
 import { downloadUrl } from "@/lib/cloudinary";
 import {
@@ -41,7 +43,12 @@ import {
   LANGUAGES,
   ROOMS,
 } from "@/lib/taxonomy";
-import type { Book, ReadingProgressDoc, ReadingStatus } from "@/lib/types";
+import type {
+  Book,
+  Highlight,
+  ReadingProgressDoc,
+  ReadingStatus,
+} from "@/lib/types";
 
 export default function BookDetailPage() {
   return (
@@ -359,6 +366,15 @@ function BookDetailContent() {
         </div>
       </section>
 
+      {/* Reader's notes + highlights (member-private) */}
+      {firebaseUser && (
+        <ReaderNotesSection
+          userId={firebaseUser.uid}
+          bookId={book.id}
+          progress={progress}
+        />
+      )}
+
       {/* Identifiers */}
       <section className="grid grid-cols-1 gap-8 py-10 md:grid-cols-12">
         <div className="md:col-span-3">
@@ -549,5 +565,133 @@ function FinishModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// ReaderNotesSection — private notes + highlights for the signed-in member
+// ----------------------------------------------------------------------------
+
+function ReaderNotesSection({
+  userId,
+  bookId,
+  progress,
+}: {
+  userId: string;
+  bookId: string;
+  progress: ReadingProgressDoc | null;
+}) {
+  const [notes, setNotesState] = useState(progress?.notes ?? "");
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep local notes in sync if a different tab updates them
+  useEffect(() => {
+    setNotesState(progress?.notes ?? "");
+  }, [progress?.notes]);
+
+  function onNotesChange(v: string) {
+    setNotesState(v);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setSaving(true);
+      try {
+        await saveNotes(userId, bookId, v);
+        setSavedAt(Date.now());
+      } finally {
+        setSaving(false);
+      }
+    }, 800);
+  }
+
+  async function handleRemoveHighlight(h: Highlight) {
+    if (!confirm("Remove this highlight?")) return;
+    await removeHighlight(userId, bookId, h);
+  }
+
+  const highlights = progress?.highlights ?? [];
+
+  return (
+    <section className="grid grid-cols-1 gap-8 border-b ml-hairline py-10 md:grid-cols-12">
+      <div className="md:col-span-3">
+        <h2 className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
+          Reader's notes
+        </h2>
+        <p className="mt-1 text-xs text-ink-500">Private to you</p>
+      </div>
+      <div className="md:col-span-9 space-y-6">
+        {/* Notes */}
+        <div>
+          <Textarea
+            label="Notes"
+            value={notes}
+            onChange={(e) => onNotesChange(e.target.value)}
+            rows={5}
+            placeholder="What is this book teaching you? Quotes you want to revisit? Action items?"
+          />
+          <p className="mt-1 h-4 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+            {saving
+              ? "Saving…"
+              : savedAt
+                ? `Saved · ${new Date(savedAt).toLocaleTimeString()}`
+                : ""}
+          </p>
+        </div>
+
+        {/* Highlights */}
+        <div>
+          <div className="flex items-baseline justify-between">
+            <h3 className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-ink-700">
+              Highlights ({highlights.length})
+            </h3>
+            <p className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+              Capture from the reader
+            </p>
+          </div>
+
+          {highlights.length === 0 ? (
+            <p className="mt-3 text-sm text-ink-500">
+              No highlights yet. Open the reader, select text, and choose
+              "Save highlight" to collect quotes here.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-3">
+              {highlights
+                .slice()
+                .sort((a, b) => {
+                  const at = (a.created_at as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
+                  const bt = (b.created_at as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
+                  return bt - at;
+                })
+                .map((h) => (
+                  <li
+                    key={h.id}
+                    className="group rounded-sm border-l-2 border-gold-500 bg-parchment-100/60 px-4 py-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <blockquote className="font-display text-base italic leading-relaxed text-ink-800">
+                        “{h.text}”
+                      </blockquote>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveHighlight(h)}
+                        className="rounded-sm p-1 text-ink-500 opacity-0 transition-opacity hover:bg-parchment-200 hover:text-oxblood-700 group-hover:opacity-100"
+                        aria-label="Remove highlight"
+                      >
+                        <XIcon size={13} />
+                      </button>
+                    </div>
+                    <p className="mt-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500">
+                      {h.page !== undefined && `Page ${h.page} · `}
+                      {(h.created_at as { toDate?: () => Date } | undefined)?.toDate?.().toLocaleDateString()}
+                    </p>
+                  </li>
+                ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
