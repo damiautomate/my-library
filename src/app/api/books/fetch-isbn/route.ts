@@ -164,8 +164,9 @@ async function tryOpenLibraryIsbn(
     description?: string | { value?: string };
   };
   const year = v.publish_date?.match(/(\d{4})/)?.[1];
-  const cover =
-    v.covers?.[0] && `https://covers.openlibrary.org/b/id/${v.covers[0]}-L.jpg`;
+  const cover = v.covers?.[0]
+    ? `https://covers.openlibrary.org/b/id/${v.covers[0]}-L.jpg`
+    : undefined;
   const desc =
     typeof v.description === "string" ? v.description : v.description?.value;
   const lang = v.languages?.[0]?.key?.split("/").pop();
@@ -199,7 +200,7 @@ async function tryOpenLibraryIsbn(
     language: lang,
     isbn_10: v.isbn_10?.[0],
     isbn_13: v.isbn_13?.[0],
-    cover_url: cover ?? undefined,
+    cover_url: cover,
     source: "open_library_isbn",
   };
 }
