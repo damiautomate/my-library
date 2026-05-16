@@ -22,6 +22,10 @@ export interface UserDoc {
   invited_by?: string;
   joined_at: Timestamp;
   last_active_at: Timestamp;
+  /** YYYY-MM-DD strings (UTC). Appended in saveProgress for streaks. */
+  reading_days?: string[];
+  /** When true, the member is suspended. Auth still works but the AuthGuard kicks them out. */
+  disabled?: boolean;
 }
 
 // ============================================================

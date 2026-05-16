@@ -169,7 +169,7 @@ export function EPUBReader({
   }
 
   return (
-    <div className="relative h-[calc(100vh-180px)] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg">
+    <div className="relative h-[calc(100vh-200px)] min-h-[400px] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg md:h-[calc(100vh-180px)]">
       <ReactReader
         url={url}
         location={location}

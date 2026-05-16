@@ -13,7 +13,7 @@ export default function LandingPage() {
             <p className="font-mono text-[0.7rem] uppercase tracking-[0.25em] text-oxblood-700">
               An invitation-only reading room
             </p>
-            <h1 className="mt-5 font-display text-5xl leading-[0.95] tracking-tightest text-ink-900 md:text-7xl">
+            <h1 className="mt-5 font-display text-4xl leading-[0.95] tracking-tightest text-ink-900 sm:text-5xl md:text-7xl">
               The library
               <br />
               <span className="text-oxblood-700">that reads back.</span>

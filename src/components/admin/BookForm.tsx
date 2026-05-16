@@ -1,7 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Search as SearchIcon, Sparkles } from "lucide-react";
+import {
+  Search as SearchIcon,
+  Sparkles,
+  Wand2,
+  Loader2,
+  CheckCircle2,
+} from "lucide-react";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
@@ -211,6 +217,9 @@ export function BookForm({
 
   return (
     <div className="flex flex-col gap-8">
+      {/* AI Fill — the prominent one-click action */}
+      <AiFiller value={value} onChange={onChange} bookId={bookId} />
+
       {/* Core metadata */}
       <section className="ml-card p-6">
         <header className="mb-5 flex items-baseline justify-between border-b ml-hairline pb-3">
@@ -593,5 +602,208 @@ function IsbnFetcher({
         Tip: empty fields will be filled in. Anything you've already typed is left alone.
       </p>
     </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// AiFiller — the prominent "let the AI do this" button. Calls /api/books/ai-fill
+// with the title (and pdf_url if uploaded), then merges the response into the
+// form's empty fields only.
+// ----------------------------------------------------------------------------
+
+function AiFiller({
+  value,
+  onChange,
+  bookId,
+}: {
+  value: BookFormValue;
+  onChange: (next: BookFormValue) => void;
+  bookId: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [phase, setPhase] = useState<string>("");
+  const [done, setDone] = useState<{
+    filledKeys: string[];
+    notes: string[];
+  } | null>(null);
+
+  const hasTitle = value.title.trim().length > 0;
+  const hasPdf = !!value.pdf_url;
+  const hasAuthor = value.authors.trim().length > 0;
+
+  async function run() {
+    setErr(null);
+    setDone(null);
+    if (!hasTitle) {
+      setErr("Type at least the title first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const u = firebaseAuth.currentUser;
+      if (!u) throw new Error("Not signed in");
+      const token = await u.getIdToken();
+
+      setPhase(
+        hasPdf
+          ? "Reading the first chapter…"
+          : "Asking the AI about this book…",
+      );
+
+      const res = await fetch("/api/books/ai-fill", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          title: value.title.trim(),
+          author: value.authors.trim() || undefined,
+          pdf_url: value.pdf_url || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "AI fill failed");
+
+      // Merge ONLY into empty fields. Anything you've typed wins.
+      const next = { ...value };
+      const filled: string[] = [];
+
+      function maybeStr(field: keyof BookFormValue, incoming?: string) {
+        const cur = next[field] as unknown as string;
+        if (incoming && !cur) {
+          (next[field] as unknown as string) = incoming;
+          filled.push(String(field));
+        }
+      }
+      function maybeNum(field: keyof BookFormValue, incoming?: number) {
+        const cur = next[field] as unknown as string;
+        if (incoming !== undefined && !cur) {
+          (next[field] as unknown as string) = String(incoming);
+          filled.push(String(field));
+        }
+      }
+      function maybeArr<K extends keyof BookFormValue>(
+        field: K,
+        incoming?: unknown[],
+      ) {
+        const cur = next[field] as unknown as unknown[];
+        if (incoming && incoming.length > 0 && (!cur || cur.length === 0)) {
+          (next[field] as unknown as unknown[]) = incoming;
+          filled.push(String(field));
+        }
+      }
+
+      maybeStr("title", data.title);
+      maybeStr("subtitle", data.subtitle);
+      if (data.authors && data.authors.length && !next.authors.trim()) {
+        next.authors = data.authors.join(", ");
+        filled.push("authors");
+      }
+      maybeStr("description", data.description);
+      maybeStr("publisher", data.publisher);
+      maybeNum("publication_year", data.publication_year);
+      maybeNum("page_count", data.page_count);
+      maybeStr("language", data.language);
+      maybeStr("isbn_10", data.isbn_10);
+      maybeStr("isbn_13", data.isbn_13);
+      maybeStr("cover_url", data.cover_url);
+      maybeStr("why_this_book", data.why_this_book);
+
+      // Classification arrays
+      maybeArr("life_domains", data.life_domains);
+      maybeArr("life_stages", data.life_stages);
+      maybeArr("rooms", data.rooms);
+      if (data.reader_level && !next.reader_level) {
+        next.reader_level = data.reader_level;
+        filled.push("reader_level");
+      } else if (
+        data.reader_level &&
+        next.reader_level === "intermediate" &&
+        data.reader_level !== "intermediate"
+      ) {
+        // The empty default is "intermediate". Treat that as "unset" so the
+        // AI's actual guess gets applied.
+        next.reader_level = data.reader_level;
+        filled.push("reader_level");
+      }
+      maybeArr("reading_modes", data.reading_modes);
+      maybeArr("cultural_contexts", data.cultural_contexts);
+      maybeArr("outcomes", data.outcomes);
+      maybeArr("fields", data.fields);
+
+      onChange(next);
+      setDone({ filledKeys: filled, notes: data.meta?.notes ?? [] });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "AI fill failed");
+    } finally {
+      setBusy(false);
+      setPhase("");
+    }
+  }
+
+  return (
+    <section className="overflow-hidden rounded-sm border border-oxblood-600/40 bg-gradient-to-br from-oxblood-50 via-parchment-50 to-parchment-100 shadow-paper">
+      <div className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
+            ★ Curator's assistant
+          </p>
+          <h2 className="mt-2 font-display text-2xl tracking-tight">
+            Let the AI fill everything
+          </h2>
+          <p className="mt-1.5 max-w-xl text-sm text-ink-700">
+            Type a title (and ideally the author), optionally upload the PDF
+            for grounding, and the AI will draft the description, classify the
+            book across every dimension, write the "Why this book" note, and
+            look up the cover via its best-guess ISBN.
+          </p>
+          <p className="mt-2 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+            {hasTitle ? "✓ Title set" : "Add the title above first"} ·{" "}
+            {hasAuthor ? "✓ Author set" : "Author optional"} ·{" "}
+            {hasPdf ? "✓ PDF will be read" : "No PDF (will use title only)"}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={run}
+          disabled={!hasTitle || busy}
+          className="inline-flex flex-shrink-0 items-center justify-center gap-2 rounded-sm border border-oxblood-700 bg-oxblood-600 px-6 py-3 font-medium text-parchment-50 shadow-paper transition-colors hover:bg-oxblood-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? (
+            <Loader2 size={16} className="animate-spin" />
+          ) : (
+            <Wand2 size={16} />
+          )}
+          {busy ? phase || "Working…" : "AI Fill"}
+        </button>
+      </div>
+
+      {(err || done) && (
+        <div className="border-t ml-hairline px-6 py-3">
+          {err ? (
+            <p className="text-sm text-oxblood-700">{err}</p>
+          ) : done ? (
+            <div className="space-y-2">
+              <p className="flex items-center gap-2 text-sm text-forest-600">
+                <CheckCircle2 size={14} />
+                Filled {done.filledKeys.length} field
+                {done.filledKeys.length === 1 ? "" : "s"} — review below and
+                save when ready.
+              </p>
+              {done.notes.length > 0 && (
+                <ul className="ml-5 list-disc font-mono text-[0.65rem] text-ink-500">
+                  {done.notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </section>
   );
 }

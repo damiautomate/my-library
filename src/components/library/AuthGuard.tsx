@@ -3,6 +3,7 @@
 import { ReactNode, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
+import { signOutUser } from "@/lib/firebase/auth";
 
 interface AuthGuardProps {
   children: ReactNode;
@@ -23,6 +24,11 @@ export function AuthGuard({ children, requireAdmin = false }: AuthGuardProps) {
     // (or their data is mid-write). Bounce to landing.
     if (firebaseUser && userDoc === null) {
       router.replace("/");
+      return;
+    }
+    // Suspended by an admin → sign out, then back to landing
+    if (userDoc?.disabled) {
+      void signOutUser().finally(() => router.replace("/?suspended=1"));
       return;
     }
     if (requireAdmin && !isAdmin) {

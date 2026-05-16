@@ -1,113 +1,114 @@
-# My Library — App 1 (Phases 1 + 2 + 3)
+# My Library — App 1 (Complete)
 
 > A curated, invite-only digital library. Books classified across 26 life
 > domains, 7 stages, 11 rooms. The storage and organisation foundation for
 > a future Library Keeper (App 2).
 
-**Phase 3 status: ✅ built** — ISBN auto-fill, library-wide search, the My Shelf
-page, per-book notes, and basic highlight capture from both readers.
+**App 1 status: ✅ complete.** All four phases shipped.
 
-## What works now
+## What works
 
-**From Phase 1**
-- Next.js 14 + TypeScript + Tailwind, design system, taxonomy
+**Phase 1 — Foundation**
+- Next.js 14 + TypeScript + Tailwind, design system, taxonomy (26 domains / 7 stages / 11 rooms)
 - Firebase Auth with invite allowlist; Firestore + security rules
 - Admin book CRUD; rooms grid; browse with facet filters; book detail
 
-**From Phase 2**
+**Phase 2 — Files & Reading**
 - Signed Cloudinary uploads (PDF, EPUB, audio, cover) with progress bars
 - In-app PDF, EPUB, and audio readers with debounced progress saves
 - Auto-status transitions; "mark as finished" rating + closing-note modal
-- Download buttons; humanized auth errors
+- Download buttons
 
-**New in Phase 3**
-- **ISBN auto-fill** — admin paste an ISBN, click *Auto-fill*, and the form is populated from Google Books (with Open Library fallback)
-- **Library search** at `/library/search?q=…` — token-based ranked search across title, subtitle, authors, description
-- **Header search shortcut** — always-on magnifying glass in the nav
-- **My Shelf** at `/library/shelf` — status tabs (currently reading, want to read, finished, paused, abandoned), stats row (incl. "Finished in {year}"), live-updating book grids per tab
-- **Reader's Notes** — private free-form notes per book, debounced auto-save
-- **Highlight capture** in both readers:
-  - PDF: select text → floating "Save highlight" pill → stored with page number
-  - EPUB: select text → top-of-reader prompt → stored with CFI
-- **Highlights gallery** on the book detail page with date stamps and remove-on-hover
+**Phase 3 — Discovery & Personal Layer**
+- ISBN auto-fill with 4-tier fallback (Google Books exact, Google Books text, Open Library /isbn, Open Library /api/books)
+- Library-wide search with ranked scoring
+- My Shelf with status tabs and live updates
+- Private per-book notes (auto-saved)
+- Highlight capture in PDF and EPUB readers
+- Highlights gallery on book detail
 
-## What's still ahead
-
-- **Phase 4** — Reader's Passport stats page, atmospheric polish for the rooms grid, mobile pass, role management
+**Phase 4 — Polish & Atmosphere**
+- **Reader's Passport** at `/library/passport` — hero stats, streak detail, contribution calendar, breakdowns by room/domain/stage, top authors, recent finishes
+- **Real reading streaks** — every save appends today's date to `users.{uid}.reading_days` via `arrayUnion`; current + longest computed in the user's local timezone
+- **Role management** — admins can promote, demote, suspend, restore from `/admin/users`. Last-active-admin demote/suspend is blocked server-side. Suspended users are signed out automatically.
+- **Atmospheric rooms grid** — each room has its own tint + accent color + decorative Roman numeral; asymmetric layout for visual rhythm
+- **Mobile pass** — slide-in hamburger drawer in the header on screens narrower than `lg`; filter sidebar becomes a "Filters" button + slide-in drawer with sticky "Show results"; landing hero scales down on phones; EPUB reader gains a `min-h` floor so it never collapses
+- **Time-of-day greeting** on the library home (`Good evening, Damilare`)
+- **Continue reading** strip on the library home — only shown when you have an active book
 
 ---
 
-## Online-only deploy (same workflow as Phase 2)
+## Online-only deploy (same as before)
 
-### 1. Pull Phase 3 into your Codespace
+### 1. Pull Phase 4 into your Codespace
 
-1. Open your `my-library` repo on GitHub → green **Code** → **Codespaces** → **Create codespace on main** (or reopen an existing one).
-2. Drag the `my-library-phase3.zip` into the file explorer.
+1. Open your `my-library` repo on GitHub → green **Code** → **Codespaces** → reopen or create a fresh one.
+2. Drag the `my-library-phase4.zip` into the file explorer.
 3. Terminal:
    ```bash
-   unzip -o my-library-phase3.zip -d /tmp/p3
-   cp -r /tmp/p3/my-library/. .
-   rm my-library-phase3.zip
+   unzip -o my-library-phase4.zip -d /tmp/p4
+   cp -r /tmp/p4/my-library/. .
+   rm my-library-phase4.zip
    git add -A
-   git commit -m "Phase 3: ISBN auto-fill, search, My Shelf, notes, highlights"
+   git commit -m "Phase 4: passport, streaks, mobile pass, room polish, role mgmt"
    git push
    ```
-4. Vercel auto-deploys on push. Wait ~2 minutes.
+4. Vercel auto-deploys. ~2 minutes.
 
-### 2. No new environment variables needed
+### 2. No new environment variables
 
-Phase 3 reuses everything already set up. Google Books and Open Library are public APIs with no key required.
+Reuses everything you've already set: Firebase client + admin, Cloudinary, Google Books API key.
 
-### 3. No Firestore rule changes needed
+### 3. No Firestore rule changes
 
-The Phase 1 rules already grant members write access to their own
-`reading_progress` doc (notes + highlights are fields on that doc, so they're
-covered automatically).
-
----
-
-## Testing Phase 3
-
-1. **ISBN auto-fill** — `/admin/books/new` → paste `9780735211292` (Atomic Habits) → click *Auto-fill*. Title, authors, publisher, year, page count, description, language, and cover should pre-populate. Now type a custom subtitle; auto-fill won't overwrite it on a second lookup.
-2. **Search** — Magnifying glass in the header. Try a partial author name or a word from a description. Results sort by relevance (title hits beat description hits).
-3. **My Shelf** — *My Shelf* in the header. Start a book in the reader, then come back here — it should appear under *Currently reading*. Mark another as *Want to read* from its detail page; check *Want to read* tab.
-4. **Notes** — Book detail → *Reader's notes* section → type. After ~800 ms it shows *Saved · HH:MM:SS*. Reload — the notes persist.
-5. **Highlights — PDF** — Open a PDF book. Select 5+ characters of text. A floating *Save highlight* pill appears. Click it. A toast confirms. Back on the book's detail page, your highlight appears with the page number under *Highlights*.
-6. **Highlights — EPUB** — Same flow, but the prompt appears at the top of the reader (EPUB iframes block per-page positioning).
-7. **Remove a highlight** — Detail page → hover a highlight → small × in the corner.
+Phase 1 rules already allow:
+- Users to update their own doc (and that update now includes `reading_days`)
+- Admins to update other users' docs (and that update now includes `role` and `disabled`)
 
 ---
 
-## What's new on disk (Phase 3)
+## Testing Phase 4
+
+1. **Reader's Passport** — sign in → top nav → **Passport**. Should show all zeros if you haven't read anything yet. Open a book and turn a few pages, then return to Passport — current streak goes to 1, today's cell in the calendar lights up. Mark a book finished — recents row populates, byRoom/byDomain breakdowns fill in.
+2. **Streak behaviour** — close the app, come back tomorrow, turn a page, refresh Passport: streak should be 2. Skip a day, come back the day after: streak resets to 1, longest streak still holds the higher number.
+3. **Mobile** — open the deployed URL on your phone (or Chrome DevTools device-mode at 375×667). Tap the hamburger → all routes accessible. On `/library/browse` tap the **Filters** button → drawer appears → pick a few facets → **Show results**.
+4. **Atmospheric polish** — `/library` desktop view should show the rooms grid with visibly different tints per room and a faint Roman numeral on each card.
+5. **Role management** — `/admin/users`:
+   - Click **Promote** on a member → they become admin (visible in their next session's header)
+   - Click **Demote** on the only other admin → succeeds
+   - Click **Demote** on yourself → button shows "Use another admin" — you can't.
+   - Try **Suspend** on another admin when you'd be the only one left → 409 error with the safety message.
+6. **Suspended user** — suspend a test account. If that account is signed in elsewhere, it should bounce to `/?suspended=1` within seconds (Firestore live snapshot). If they try to sign in again, they'll get past Firebase Auth but the AuthGuard immediately signs them back out.
+
+---
+
+## What's new on disk (Phase 4)
 
 ```
 src/
 ├── app/
-│   ├── api/books/fetch-isbn/route.ts   ★ Real ISBN lookup (Google Books → Open Library)
-│   ├── library/
-│   │   ├── search/page.tsx             ★ /library/search?q=…
-│   │   └── shelf/page.tsx              ★ /library/shelf
-│   └── book/[bookId]/page.tsx          ↻ Reader's notes + highlights gallery
-├── components/
-│   ├── admin/BookForm.tsx              ↻ IsbnFetcher replaces the two ISBN inputs
-│   ├── library/Header.tsx              ↻ Search icon + My Shelf link
-│   └── readers/
-│       ├── PDFReader.tsx               ↻ Selection-based highlight capture
-│       └── EPUBReader.tsx              ↻ Selection-based highlight capture
+│   ├── api/users/role/route.ts          ★ Role + suspend endpoint with last-admin safety
+│   └── library/passport/page.tsx        ★ Reader's Passport
+├── components/library/
+│   ├── AuthGuard.tsx                    ↻ Bounces suspended users
+│   ├── FilterSidebar.tsx                ↻ Mobile drawer
+│   ├── Header.tsx                       ↻ Mobile hamburger drawer
+│   └── RoomCard.tsx                     ↻ Per-room tints + Roman numerals
 └── lib/
-    └── progress.ts                     ↻ listUserProgress, watchUserProgress,
-                                         saveNotes, addHighlight, removeHighlight
+    ├── passport.ts                      ★ Streak + stats computation
+    ├── progress.ts                      ↻ Appends to users.reading_days on save
+    └── types.ts                         ↻ UserDoc gains reading_days + disabled
 ```
 
-★ = new in Phase 3
+★ = new in Phase 4
 ↻ = modified
 
 ---
 
-## Common Phase 3 snags
+## Done with App 1
 
-- **ISBN lookup returns 404** — some books legitimately aren't in either database. Type the metadata in manually; it doesn't block anything.
-- **EPUB highlight prompt doesn't appear** — selections inside the iframe sometimes don't fire `selected` on the first try; release and re-select, or select a slightly longer span. Once you've highlighted once in a session it works reliably.
-- **Highlight saved but doesn't show on the detail page** — the page subscribes to live progress updates but if you have two tabs open they each subscribe; if it doesn't appear immediately, reload.
-- **My Shelf shows empty under "Currently reading" after opening a book** — the auto-status transition only fires after the first debounced save (1.5s after opening). Turn one page or wait a few seconds.
-- **Search shows nothing for a word that's clearly in a book** — the search only matches *visible* fields (title, subtitle, authors, description). Classification labels aren't searchable yet; use the Browse filters instead.
+The library is now a complete, working, deployable product. Next step is **App 2 — Library Keeper**, the AI conversational layer that talks to the same Firestore data: "what should I read next?", "what's the right Counting Room book for stage 4?", "I've finished Atomic Habits — what pairs with it?".
+
+App 2 lives in a separate repo and only reads from the data model App 1 owns. The `pairs_with` / `parent_books` / `child_books` fields on `books` are already there waiting, the `outcomes` and `fields` arrays carry the semantic tags App 2 needs, and `reading_progress` gives it your reading history to ground recommendations in. No App 1 data migration will be needed.
+
+When you're ready to start App 2, give me the App 2 spec the same way you gave me this one.

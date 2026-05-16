@@ -59,6 +59,16 @@ export async function saveProgress(
   const ref = doc(db, COL, progressId(userId, bookId));
   const existing = await getDoc(ref);
 
+  // Always record today as a reading day on the user document. arrayUnion is
+  // idempotent — repeated saves on the same day don't grow the array. We use
+  // UTC dates here; the passport renders them in the user's local TZ.
+  const today = new Date().toISOString().slice(0, 10);
+  void setDoc(
+    doc(db, "users", userId),
+    { reading_days: arrayUnion(today) },
+    { merge: true },
+  ).catch((e) => console.warn("[progress] reading_days update failed", e));
+
   if (!existing.exists()) {
     await setDoc(ref, {
       user_id: userId,
