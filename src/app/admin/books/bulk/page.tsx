@@ -14,6 +14,8 @@ import {
   Upload,
   Type as TypeIcon,
   X as XIcon,
+  Globe,
+  Search,
 } from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
@@ -28,7 +30,7 @@ import {
   type BookFormValue,
 } from "@/components/admin/BookForm";
 
-type Mode = "titles" | "pdfs";
+type Mode = "titles" | "pdfs" | "public_domain";
 
 type RowStatus =
   | "queued"
@@ -49,9 +51,38 @@ interface Row {
   filledKeys?: number;
   pdfUrl?: string;
   error?: string;
+  /** Public-domain source rows */
+  source?: "gutenberg" | "se_url";
+  gutenberg_id?: number;
+  source_url?: string;
+  has_epub?: boolean;
+  has_pdf?: boolean;
+  has_cover?: boolean;
+}
+
+/** Pending public-domain source — staged before the user clicks Start. */
+interface PendingSource {
+  id: string;
+  kind: "gutenberg" | "se_url";
+  title: string;
+  author?: string;
+  gutenberg_id?: number;
+  url?: string;
 }
 
 const CONCURRENCY = 2; // 2 books in parallel keeps us under Anthropic + Cloudinary tier limits
+
+interface GutenbergSearchResult {
+  id: number;
+  title: string;
+  authors: string[];
+  languages: string[];
+  subjects: string[];
+  bookshelves: string[];
+  download_count: number;
+  epub_url?: string;
+  cover_url?: string;
+}
 
 export default function BulkImportPage() {
   return (
@@ -70,6 +101,14 @@ function BulkContent() {
   const [rows, setRows] = useState<Row[]>([]);
   const [running, setRunning] = useState(false);
   const filePickerRef = useRef<HTMLInputElement>(null);
+
+  // Public-domain mode state
+  const [pendingSources, setPendingSources] = useState<PendingSource[]>([]);
+  const [gQuery, setGQuery] = useState("");
+  const [gResults, setGResults] = useState<GutenbergSearchResult[]>([]);
+  const [gSearching, setGSearching] = useState(false);
+  const [gError, setGError] = useState<string | null>(null);
+  const [seUrls, setSeUrls] = useState("");
 
   // ----- Titles mode parsing -----------------------------------------------
 
@@ -123,11 +162,107 @@ function BulkContent() {
       .replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
+  /** Take a Standard Ebooks URL and infer a readable title from the path. */
+  function deriveTitleFromUrl(url: string): string {
+    try {
+      const u = new URL(url);
+      const parts = u.pathname.split("/").filter(Boolean);
+      // /ebooks/{author}/{title}[/{translator}]
+      const titleSlug = parts[2] ?? parts[parts.length - 1] ?? "";
+      return titleSlug
+        .replace(/-/g, " ")
+        .replace(/\.(epub|pdf)$/i, "")
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+        .trim();
+    } catch {
+      return url;
+    }
+  }
+
   function buildRowsFromFiles(): Row[] {
     return files.map((f) => ({
       id: Math.random().toString(36).slice(2, 9),
       title: titleFromFilename(f.name),
       file: f,
+      status: "queued" as RowStatus,
+    }));
+  }
+
+  // ----- Public-domain mode -----------------------------------------------
+
+  async function runGutenbergSearch() {
+    const q = gQuery.trim();
+    if (!q) return;
+    setGError(null);
+    setGSearching(true);
+    setGResults([]);
+    try {
+      const u = firebaseAuth.currentUser;
+      if (!u) throw new Error("Not signed in");
+      const token = await u.getIdToken();
+      const res = await fetch("/api/books/search-gutenberg", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ query: q }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Search failed");
+      setGResults(data.results ?? []);
+    } catch (e) {
+      setGError(e instanceof Error ? e.message : "Search failed");
+    } finally {
+      setGSearching(false);
+    }
+  }
+
+  function queueGutenberg(book: GutenbergSearchResult) {
+    setPendingSources((prev) => {
+      if (prev.some((p) => p.kind === "gutenberg" && p.gutenberg_id === book.id))
+        return prev; // already queued
+      return [
+        ...prev,
+        {
+          id: Math.random().toString(36).slice(2, 9),
+          kind: "gutenberg",
+          gutenberg_id: book.id,
+          title: book.title,
+          author: book.authors[0],
+        },
+      ];
+    });
+  }
+
+  function queueSEUrls() {
+    const urls = seUrls
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (urls.length === 0) return;
+    const newOnes: PendingSource[] = urls.map((url) => ({
+      id: Math.random().toString(36).slice(2, 9),
+      kind: "se_url",
+      url,
+      title: deriveTitleFromUrl(url),
+    }));
+    setPendingSources((prev) => [...prev, ...newOnes]);
+    setSeUrls("");
+  }
+
+  function removePending(id: string) {
+    setPendingSources((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  function buildRowsFromSources(): Row[] {
+    return pendingSources.map((p) => ({
+      id: p.id,
+      title: p.title,
+      author: p.author,
+      source: p.kind,
+      gutenberg_id: p.gutenberg_id,
+      source_url: p.url,
       status: "queued" as RowStatus,
     }));
   }
@@ -143,6 +278,45 @@ function BulkContent() {
   const processOne = useCallback(
     async (row: Row) => {
       if (!firebaseUser) throw new Error("Not signed in");
+      const u = firebaseAuth.currentUser;
+      if (!u) throw new Error("Not signed in");
+      const token = await u.getIdToken();
+
+      // ---- Public-domain source rows: server does everything -------------
+      if (row.source) {
+        updateRow(row.id, { status: "ai_filling" }); // "fetching + classifying"
+        const body =
+          row.source === "gutenberg"
+            ? { source: "gutenberg", gutenberg_id: row.gutenberg_id }
+            : {
+                source: "url",
+                url: row.source_url,
+                title_hint: row.title,
+                author_hint: row.author,
+              };
+        const res = await fetch("/api/books/import-source", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Import failed");
+        updateRow(row.id, {
+          status: "done",
+          bookId: data.book_id,
+          title: data.title || row.title,
+          has_epub: data.has_epub,
+          has_pdf: data.has_pdf,
+          has_cover: data.has_cover,
+        });
+        return;
+      }
+
+      // ---- Title or PDF rows: client-side upload + AI fill --------------
+
       const bookId = newBookId();
       updateRow(row.id, { bookId });
 
@@ -170,9 +344,6 @@ function BulkContent() {
 
       // 2. AI Fill (grounded in PDF text if uploaded)
       updateRow(row.id, { status: "ai_filling" });
-      const u = firebaseAuth.currentUser;
-      if (!u) throw new Error("Not signed in");
-      const token = await u.getIdToken();
       const res = await fetch("/api/books/ai-fill", {
         method: "POST",
         headers: {
@@ -253,7 +424,12 @@ function BulkContent() {
   // ----- Kick off the queue ------------------------------------------------
 
   const runAll = useCallback(async () => {
-    const parsed = mode === "titles" ? parseTitles() : buildRowsFromFiles();
+    const parsed =
+      mode === "titles"
+        ? parseTitles()
+        : mode === "pdfs"
+          ? buildRowsFromFiles()
+          : buildRowsFromSources();
     if (parsed.length === 0) return;
     setRows(parsed);
     setRunning(true);
@@ -282,7 +458,7 @@ function BulkContent() {
     );
 
     setRunning(false);
-  }, [mode, pasted, files, processOne]);
+  }, [mode, pasted, files, pendingSources, processOne]);
 
   const queuedCount = rows.filter((r) => r.status === "queued").length;
   const doneCount = rows.filter((r) => r.status === "done").length;
@@ -290,7 +466,9 @@ function BulkContent() {
   const inputCount =
     mode === "titles"
       ? pasted.split("\n").filter((l) => l.trim()).length
-      : files.length;
+      : mode === "pdfs"
+        ? files.length
+        : pendingSources.length;
 
   return (
     <main className="mx-auto max-w-5xl px-6 pb-24 pt-12">
@@ -309,7 +487,7 @@ function BulkContent() {
       </header>
 
       {/* Mode tabs */}
-      <nav className="mb-6 flex items-center gap-1 border-b ml-hairline pb-3">
+      <nav className="mb-6 flex flex-wrap items-center gap-1 border-b ml-hairline pb-3">
         <ModeTab
           active={mode === "titles"}
           onClick={() => !running && setMode("titles")}
@@ -323,6 +501,13 @@ function BulkContent() {
           icon={<FileText size={13} />}
           label="By PDF files"
           sub="Reads each PDF, most accurate"
+        />
+        <ModeTab
+          active={mode === "public_domain"}
+          onClick={() => !running && setMode("public_domain")}
+          icon={<Globe size={13} />}
+          label="Public domain"
+          sub="Gutenberg + Standard Ebooks"
         />
       </nav>
 
@@ -349,7 +534,7 @@ The Total Money Makeover | Dave Ramsey`}
               Format: "Title" or "Title | Author Name" or "Title — Author Name"
             </p>
           </>
-        ) : (
+        ) : mode === "pdfs" ? (
           <>
             <label className="mb-2 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
               PDF files ({inputCount} selected)
@@ -410,12 +595,186 @@ The Total Money Makeover | Dave Ramsey`}
               Filenames become initial titles (the AI may canonicalize them).
             </p>
           </>
+        ) : (
+          <>
+            {/* Public-domain: Gutenberg search + Standard Ebooks URL paste */}
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+              {/* --- Gutenberg search column --- */}
+              <div>
+                <label className="mb-2 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+                  Project Gutenberg search
+                </label>
+                <div className="flex items-stretch gap-2">
+                  <input
+                    value={gQuery}
+                    onChange={(e) => setGQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void runGutenbergSearch();
+                      }
+                    }}
+                    placeholder="Meditations Marcus Aurelius"
+                    disabled={running || gSearching}
+                    className="flex-1 rounded-sm border border-ink-500/25 bg-parchment-50 px-3 py-2 text-sm focus:border-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-700/20 disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void runGutenbergSearch()}
+                    disabled={running || gSearching || !gQuery.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-3 py-2 text-sm text-ink-800 hover:bg-parchment-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {gSearching ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <Search size={12} />
+                    )}
+                    Search
+                  </button>
+                </div>
+                {gError && (
+                  <p className="mt-2 text-xs text-oxblood-700">{gError}</p>
+                )}
+                <div className="mt-3 max-h-80 overflow-y-auto rounded-sm border border-ink-500/15">
+                  {gResults.length === 0 ? (
+                    <p className="px-3 py-4 text-center font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+                      {gSearching
+                        ? "Searching…"
+                        : "Search Project Gutenberg's 70k+ public-domain books"}
+                    </p>
+                  ) : (
+                    <ul className="divide-y divide-ink-500/10">
+                      {gResults.map((b) => {
+                        const alreadyQueued = pendingSources.some(
+                          (p) =>
+                            p.kind === "gutenberg" && p.gutenberg_id === b.id,
+                        );
+                        return (
+                          <li
+                            key={b.id}
+                            className="flex items-start gap-3 p-3"
+                          >
+                            {b.cover_url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={b.cover_url}
+                                alt=""
+                                className="h-14 w-10 flex-shrink-0 rounded-sm object-cover"
+                              />
+                            ) : (
+                              <div className="h-14 w-10 flex-shrink-0 rounded-sm bg-parchment-200" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="line-clamp-2 font-display text-sm text-ink-900">
+                                {b.title}
+                              </p>
+                              <p className="truncate text-xs text-ink-600">
+                                {b.authors.join(", ") || "Unknown"}
+                              </p>
+                              <p className="font-mono text-[0.6rem] uppercase tracking-[0.1em] text-ink-500">
+                                #{b.id} · {b.download_count.toLocaleString()} downloads
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => queueGutenberg(b)}
+                              disabled={alreadyQueued || running}
+                              className="flex-shrink-0 rounded-sm border border-oxblood-600/40 bg-oxblood-50 px-2 py-1 text-[0.65rem] uppercase tracking-[0.15em] text-oxblood-700 hover:bg-oxblood-50/70 disabled:cursor-not-allowed disabled:border-ink-500/20 disabled:bg-parchment-100 disabled:text-ink-500"
+                            >
+                              {alreadyQueued ? "Queued" : "Queue"}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* --- Standard Ebooks URL paste --- */}
+              <div>
+                <label className="mb-2 block font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+                  Standard Ebooks URLs
+                </label>
+                <textarea
+                  value={seUrls}
+                  onChange={(e) => setSeUrls(e.target.value)}
+                  rows={5}
+                  placeholder={`https://standardebooks.org/ebooks/marcus-aurelius/meditations/george-long
+https://standardebooks.org/ebooks/sun-tzu/the-art-of-war/lionel-giles`}
+                  disabled={running}
+                  className="w-full rounded-sm border border-ink-500/25 bg-parchment-50 p-3 font-mono text-xs leading-relaxed focus:border-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-700/20 disabled:opacity-50"
+                />
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <p className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+                    Paste book-page URLs · one per line
+                  </p>
+                  <button
+                    type="button"
+                    onClick={queueSEUrls}
+                    disabled={running || !seUrls.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-2 py-1 text-[0.65rem] uppercase tracking-[0.15em] text-ink-800 hover:bg-parchment-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Queue all
+                  </button>
+                </div>
+                <p className="mt-3 font-mono text-[0.6rem] uppercase tracking-[0.1em] text-ink-500">
+                  Or paste any direct .epub / .pdf URL — works for other
+                  public-domain hosts too.
+                </p>
+              </div>
+            </div>
+
+            {/* --- Queued sources preview --- */}
+            {pendingSources.length > 0 && (
+              <div className="mt-5 max-h-64 overflow-y-auto rounded-sm border border-ink-500/15 bg-parchment-100/60">
+                <header className="border-b ml-hairline px-3 py-2 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+                  Queued ({pendingSources.length})
+                </header>
+                <ul className="divide-y divide-ink-500/10">
+                  {pendingSources.map((p) => (
+                    <li
+                      key={p.id}
+                      className="flex items-center justify-between gap-2 px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-ink-800">
+                          {p.title}
+                        </p>
+                        <p className="truncate font-mono text-[0.6rem] uppercase tracking-[0.1em] text-ink-500">
+                          {p.kind === "gutenberg"
+                            ? `Gutenberg #${p.gutenberg_id}`
+                            : p.url}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removePending(p.id)}
+                        disabled={running}
+                        className="rounded-sm p-1 text-ink-500 hover:bg-parchment-200 hover:text-oxblood-700 disabled:opacity-30"
+                        aria-label="Remove"
+                      >
+                        <XIcon size={12} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <p className="mt-3 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
+              Each queued source: server downloads the file → uploads to your
+              Cloudinary → AI classifies → saved as draft. ~10–25s per book.
+            </p>
+          </>
         )}
 
         <div className="mt-5 flex items-center justify-between gap-3 border-t ml-hairline pt-4">
           <p className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500">
             {CONCURRENCY} run in parallel.
             {mode === "pdfs" && " Files uploaded one at a time per worker."}
+            {mode === "public_domain" &&
+              " Server downloads each book then runs AI."}
           </p>
           <Button
             variant="primary"
@@ -430,7 +789,11 @@ The Total Money Makeover | Dave Ramsey`}
             ) : (
               <>
                 <Wand2 size={14} />
-                {mode === "pdfs" ? "Upload & import" : "Start import"}
+                {mode === "pdfs"
+                  ? "Upload & import"
+                  : mode === "public_domain"
+                    ? "Import queued"
+                    : "Start import"}
               </>
             )}
           </Button>
@@ -484,6 +847,21 @@ The Total Money Makeover | Dave Ramsey`}
                   )}
                   {r.error && (
                     <p className="mt-1 text-xs text-oxblood-700">{r.error}</p>
+                  )}
+                  {r.status === "done" && r.source && (
+                    <div className="mt-1 flex items-center gap-1.5">
+                      {r.has_epub && (
+                        <span className="ml-chip text-[0.55rem]">EPUB</span>
+                      )}
+                      {r.has_pdf && (
+                        <span className="ml-chip text-[0.55rem]">PDF</span>
+                      )}
+                      {r.has_cover && (
+                        <span className="ml-chip ml-chip--gold text-[0.55rem]">
+                          cover
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-2">
