@@ -9,6 +9,7 @@ import { AuthGuard } from "@/components/library/AuthGuard";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/contexts/AuthContext";
 import { getBook } from "@/lib/books";
+import { proxyFileUrl } from "@/lib/cloudinary";
 import { getProgress } from "@/lib/progress";
 import type { Book, ReadingProgressDoc } from "@/lib/types";
 
@@ -58,6 +59,25 @@ function ReadContent() {
   const [book, setBook] = useState<Book | null | undefined>(undefined);
   const [progress, setProgress] = useState<ReadingProgressDoc | null>(null);
   const [livePct, setLivePct] = useState<number | null>(null);
+  const [proxyUrls, setProxyUrls] = useState<Partial<Record<Mode, string>>>({});
+
+  // Resolve same-origin proxy URLs for each available format. Recomputed any
+  // time the book or signed-in user changes (since the URL embeds an ID token).
+  useEffect(() => {
+    if (!book || !firebaseUser) return;
+    let cancelled = false;
+    (async () => {
+      const next: Partial<Record<Mode, string>> = {};
+      if (book.pdf_url) next.pdf = await proxyFileUrl(book.id, "pdf");
+      if (book.epub_url) next.epub = await proxyFileUrl(book.id, "epub");
+      if (book.audio_summary_url)
+        next.audio = await proxyFileUrl(book.id, "audio");
+      if (!cancelled) setProxyUrls(next);
+    })().catch((err) => console.warn("[read] proxyFileUrl failed", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [book, firebaseUser]);
 
   useEffect(() => {
     if (!bookId) return;
@@ -139,33 +159,38 @@ function ReadContent() {
       )}
 
       <div className="mt-4">
-        {mode === "pdf" && book.pdf_url && (
+        {mode === "pdf" && proxyUrls.pdf && (
           <PDFReader
-            url={book.pdf_url}
+            url={proxyUrls.pdf}
             userId={firebaseUser.uid}
             bookId={book.id}
             initialPage={progress?.current_page}
             onPercentChange={setLivePct}
           />
         )}
-        {mode === "epub" && book.epub_url && (
+        {mode === "epub" && proxyUrls.epub && (
           <EPUBReader
-            url={book.epub_url}
+            url={proxyUrls.epub}
             userId={firebaseUser.uid}
             bookId={book.id}
             initialCfi={progress?.current_cfi}
             onPercentChange={setLivePct}
           />
         )}
-        {mode === "audio" && book.audio_summary_url && (
+        {mode === "audio" && proxyUrls.audio && (
           <AudioPlayer
-            url={book.audio_summary_url}
+            url={proxyUrls.audio}
             userId={firebaseUser.uid}
             bookId={book.id}
             initialSeconds={progress?.current_audio_seconds}
             durationHint={book.audio_summary_duration_seconds}
             onPercentChange={setLivePct}
           />
+        )}
+        {!proxyUrls[mode] && (
+          <p className="py-10 text-center font-mono text-[0.65rem] uppercase tracking-[0.2em] text-ink-500">
+            Preparing the {mode} reader…
+          </p>
         )}
       </div>
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Edit, Archive, Plus, Eye } from "lucide-react";
+import { Edit, Archive, Plus, Eye, Layers } from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
 import { SearchBar, matchesQuery } from "@/components/library/SearchBar";
@@ -58,11 +58,18 @@ function AdminBooksContent() {
             The Catalogue
           </h1>
         </div>
-        <Link href="/admin/books/new">
-          <Button variant="primary">
-            <Plus size={14} /> Add book
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link href="/admin/books/bulk">
+            <Button variant="outline">
+              <Layers size={14} /> Bulk
+            </Button>
+          </Link>
+          <Link href="/admin/books/new">
+            <Button variant="primary">
+              <Plus size={14} /> Add book
+            </Button>
+          </Link>
+        </div>
       </header>
 
       {/* Filter row */}

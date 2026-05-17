@@ -33,7 +33,7 @@ import {
   saveNotes,
   removeHighlight,
 } from "@/lib/progress";
-import { downloadUrl } from "@/lib/cloudinary";
+import { downloadUrl, proxyFileUrl } from "@/lib/cloudinary";
 import {
   LIFE_DOMAINS,
   LIFE_STAGES,
@@ -219,28 +219,10 @@ function BookDetailContent() {
               </Link>
             )}
             {book.pdf_url && (
-              <a
-                href={downloadUrl(
-                  book.pdf_url,
-                  `${book.title.replace(/[^\w]+/g, "_")}.pdf`,
-                )}
-                className="inline-flex items-center gap-1.5 rounded-sm px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
-              >
-                <Download size={13} />
-                PDF
-              </a>
+              <DownloadLink bookId={book.id} kind="pdf" label="PDF" />
             )}
             {book.epub_url && (
-              <a
-                href={downloadUrl(
-                  book.epub_url,
-                  `${book.title.replace(/[^\w]+/g, "_")}.epub`,
-                )}
-                className="inline-flex items-center gap-1.5 rounded-sm px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
-              >
-                <Download size={13} />
-                EPUB
-              </a>
+              <DownloadLink bookId={book.id} kind="epub" label="EPUB" />
             )}
             {book.amazon_url && (
               <a
@@ -693,5 +675,44 @@ function ReaderNotesSection({
         </div>
       </div>
     </section>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// DownloadLink — resolves a same-origin proxy URL with ?dl=1 set on click.
+// We can't pre-resolve the URL on render because the auth token rotates.
+// ----------------------------------------------------------------------------
+
+function DownloadLink({
+  bookId,
+  kind,
+  label,
+}: {
+  bookId: string;
+  kind: "pdf" | "epub" | "audio";
+  label: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  async function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    try {
+      const url = await proxyFileUrl(bookId, kind, { download: true });
+      window.location.href = url;
+    } catch (err) {
+      console.error("[download]", err);
+      setBusy(false);
+    }
+  }
+  return (
+    <a
+      href="#"
+      onClick={handleClick}
+      className="inline-flex items-center gap-1.5 rounded-sm px-3 py-2 text-sm text-ink-700 underline-offset-4 hover:underline"
+    >
+      <Download size={13} />
+      {busy ? "Preparing…" : label}
+    </a>
   );
 }

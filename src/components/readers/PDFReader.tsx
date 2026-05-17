@@ -14,8 +14,9 @@ import {
 } from "lucide-react";
 import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
 
-// Worker is served from a CDN at the exact version react-pdf bundles.
-pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
+// Worker served from jsdelivr (mirrors npm exactly). cdnjs sometimes lags
+// behind on patch versions.
+pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 interface PDFReaderProps {
   url: string;
@@ -37,6 +38,7 @@ export function PDFReader({
   const [page, setPage] = useState<number>(initialPage ?? 1);
   const [scale, setScale] = useState(1);
   const [width, setWidth] = useState<number>(800);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const saver = useMemo(
@@ -245,6 +247,11 @@ export function PDFReader({
         <Document
           file={url}
           onLoadSuccess={handleLoadSuccess}
+          onLoadError={(err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("[pdf] load error", err);
+            setLoadError(msg);
+          }}
           loading={
             <div className="flex flex-col items-center gap-2 py-16 text-ink-500">
               <Loader2 className="animate-spin" />
@@ -254,10 +261,19 @@ export function PDFReader({
             </div>
           }
           error={
-            <div className="py-16 text-center text-oxblood-700">
-              <p className="font-display text-lg">Could not load this PDF.</p>
-              <p className="mt-2 text-sm text-ink-600">
-                The file may be missing or corrupted.
+            <div className="mx-auto max-w-md py-12 text-center">
+              <p className="font-display text-xl text-oxblood-700">
+                Could not load this PDF.
+              </p>
+              <p className="mt-3 text-sm text-ink-600">
+                The reader received an error while trying to open the file:
+              </p>
+              <pre className="mt-3 max-h-32 overflow-auto rounded-sm border border-oxblood-600/30 bg-oxblood-50 px-3 py-2 text-left font-mono text-[0.7rem] text-oxblood-700">
+                {loadError ?? "Unknown error"}
+              </pre>
+              <p className="mt-4 text-xs text-ink-500">
+                If this keeps happening, try downloading the PDF directly from
+                the book page and let the librarian know what's in the box above.
               </p>
             </div>
           }

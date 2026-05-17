@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactReader, type IReactReaderProps } from "react-reader";
 import type { Rendition, Book as EpubBook } from "epubjs";
-import { Highlighter } from "lucide-react";
+import { Highlighter, Type, ChevronLeft, ChevronRight } from "lucide-react";
 import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
 
 interface EPUBReaderProps {
@@ -32,11 +32,22 @@ export function EPUBReader({
     text: string;
   } | null>(null);
   const [savedToast, setSavedToast] = useState(false);
+  const [fontSize, setFontSize] = useState<number>(105); // percent
+  const [chapterTitle, setChapterTitle] = useState<string>("");
 
   const saver = useMemo(
     () => makeDebouncedSaver(userId, bookId, 1500),
     [userId, bookId],
   );
+
+  // Re-apply theme whenever the font size changes
+  useEffect(() => {
+    const r = renditionRef.current;
+    if (!r) return;
+    try {
+      r.themes.fontSize(`${fontSize}%`);
+    } catch {}
+  }, [fontSize]);
 
   // Save on every relocation event + compute percent once locations are built
   function handleLocationChanged(cfi: string) {
@@ -97,11 +108,23 @@ export function EPUBReader({
       body: {
         "font-family": "'IBM Plex Sans', system-ui, sans-serif",
         color: "#1A1410",
-        "line-height": "1.65",
+        "line-height": "1.55",
+        "padding-top": "0.5rem !important",
+        "padding-bottom": "0.5rem !important",
       },
-      "p, li": { "font-size": "1.05rem" },
+      "p, li": { "font-size": "1rem", margin: "0 0 0.8em 0" },
+      h1: { "font-size": "1.6rem", "margin-top": "1rem" },
+      h2: { "font-size": "1.3rem" },
+      h3: { "font-size": "1.1rem" },
+      blockquote: {
+        "border-left": "2px solid rgba(123,45,38,0.4)",
+        "padding-left": "0.75rem",
+        margin: "1em 0",
+        "font-style": "italic",
+      },
     });
     rendition.themes.select("library");
+    rendition.themes.fontSize(`${fontSize}%`);
 
     // Capture selections inside the iframe — react-reader's epub.js exposes
     // a "selected" event with (cfiRange, contents). We surface a "Save
@@ -115,6 +138,17 @@ export function EPUBReader({
       } catch (err) {
         console.warn("[epub] selection capture failed", err);
       }
+    });
+
+    // Track current chapter from the spine
+    rendition.on("rendered", (section: { href?: string }) => {
+      try {
+        const nav = book.navigation;
+        if (nav && section.href) {
+          const item = nav.get(section.href);
+          if (item?.label) setChapterTitle(item.label.trim());
+        }
+      } catch {}
     });
 
     // Generate per-character locations so we can compute percent.
@@ -168,8 +202,65 @@ export function EPUBReader({
     }
   }
 
+  const goPrev = useCallback(() => {
+    void renditionRef.current?.prev();
+  }, []);
+  const goNext = useCallback(() => {
+    void renditionRef.current?.next();
+  }, []);
+
   return (
-    <div className="relative h-[calc(100vh-200px)] min-h-[400px] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg md:h-[calc(100vh-180px)]">
+    <div className="flex w-full flex-col gap-2">
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border ml-hairline bg-parchment-50 px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={goPrev}
+            className="rounded-sm p-1.5 text-ink-700 hover:bg-parchment-100"
+            aria-label="Previous page"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={goNext}
+            className="rounded-sm p-1.5 text-ink-700 hover:bg-parchment-100"
+            aria-label="Next page"
+          >
+            <ChevronRight size={16} />
+          </button>
+          {chapterTitle && (
+            <span className="ml-2 max-w-xs truncate font-display text-sm text-ink-700">
+              {chapterTitle}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <Type size={13} className="text-ink-500" />
+          <button
+            type="button"
+            onClick={() => setFontSize((f) => Math.max(70, f - 10))}
+            className="rounded-sm px-2 py-1 font-mono text-[0.65rem] text-ink-700 hover:bg-parchment-100"
+            aria-label="Smaller font"
+          >
+            A−
+          </button>
+          <span className="font-mono text-[0.65rem] text-ink-500">
+            {fontSize}%
+          </span>
+          <button
+            type="button"
+            onClick={() => setFontSize((f) => Math.min(180, f + 10))}
+            className="rounded-sm px-2 py-1 font-mono text-[0.65rem] text-ink-700 hover:bg-parchment-100"
+            aria-label="Larger font"
+          >
+            A+
+          </button>
+        </div>
+      </div>
+
+      <div className="relative h-[calc(100vh-220px)] min-h-[480px] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg md:h-[calc(100vh-200px)]">
       <ReactReader
         url={url}
         location={location}
@@ -215,6 +306,7 @@ export function EPUBReader({
           ✓ Highlight saved
         </div>
       )}
+      </div>
     </div>
   );
 }

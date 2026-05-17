@@ -171,11 +171,51 @@ export async function deleteFile(
   }
 }
 
-/** Force-download URL for a Cloudinary asset. */
+/** Force-download URL for a Cloudinary asset.
+ *
+ * Cloudinary's fl_attachment:filename flag does NOT want a file extension or
+ * special characters — it appends the right extension based on the resource's
+ * format. A filename like "Foo Bar.pdf" produces a 400 because the dot breaks
+ * URL parsing. We strip extensions and special chars to keep it safe. */
 export function downloadUrl(secureUrl: string, filename?: string): string {
-  // Insert fl_attachment after /upload/ — Cloudinary serves with Content-Disposition: attachment
-  const flag = filename
-    ? `fl_attachment:${encodeURIComponent(filename)}`
+  if (!filename) {
+    return secureUrl.replace("/upload/", "/upload/fl_attachment/");
+  }
+  // Strip extension, replace anything non-alphanumeric (besides _-) with _,
+  // then URL-encode for the path segment.
+  const clean = filename
+    .replace(/\.[^./]+$/, "") // drop last extension
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80); // keep URLs sane
+  const flag = clean
+    ? `fl_attachment:${encodeURIComponent(clean)}`
     : "fl_attachment";
   return secureUrl.replace("/upload/", `/upload/${flag}/`);
+}
+
+// ---------------------------------------------------------------------------
+// File-proxy URLs (Phase 5)
+// ---------------------------------------------------------------------------
+
+import { auth as _auth } from "./firebase/client";
+
+/**
+ * Build a same-origin URL for a book file, served through our /api/file proxy.
+ * The user's Firebase ID token is appended as ?t=... so readers, audio
+ * elements, etc. can authenticate without setting headers.
+ *
+ * Use this for: PDF reader, EPUB reader, audio player, download buttons.
+ * Don't use the raw Cloudinary URL on the client anymore.
+ */
+export async function proxyFileUrl(
+  bookId: string,
+  kind: "pdf" | "epub" | "audio",
+  options: { download?: boolean } = {},
+): Promise<string> {
+  const u = _auth.currentUser;
+  if (!u) throw new Error("Not signed in");
+  const token = await u.getIdToken();
+  const dl = options.download ? "&dl=1" : "";
+  return `/api/file/${bookId}/${kind}?t=${encodeURIComponent(token)}${dl}`;
 }
