@@ -32,7 +32,12 @@ export function EPUBReader({
     text: string;
   } | null>(null);
   const [savedToast, setSavedToast] = useState(false);
-  const [fontSize, setFontSize] = useState<number>(105); // percent
+  // Default font: 95% on desktop, 85% on mobile (narrow viewport = less
+  // horizontal room, smaller font = more lines fit on screen)
+  const [fontSize, setFontSize] = useState<number>(() => {
+    if (typeof window !== "undefined" && window.innerWidth < 640) return 85;
+    return 95;
+  });
   const [chapterTitle, setChapterTitle] = useState<string>("");
 
   const saver = useMemo(
@@ -108,14 +113,22 @@ export function EPUBReader({
       body: {
         "font-family": "'IBM Plex Sans', system-ui, sans-serif",
         color: "#1A1410",
-        "line-height": "1.55",
-        "padding-top": "0.5rem !important",
-        "padding-bottom": "0.5rem !important",
+        "line-height": "1.5",
+        // CRITICAL on mobile: turn off justification which spreads words and
+        // wastes horizontal space. left-aligned packs more text per line.
+        "text-align": "left !important",
+        // Tighter content padding so the iframe shows more text
+        padding: "0 !important",
+        margin: "0 !important",
       },
-      "p, li": { "font-size": "1rem", margin: "0 0 0.8em 0" },
-      h1: { "font-size": "1.6rem", "margin-top": "1rem" },
-      h2: { "font-size": "1.3rem" },
-      h3: { "font-size": "1.1rem" },
+      "p, li": {
+        "font-size": "1rem",
+        margin: "0 0 0.6em 0",
+        "text-align": "left !important",
+      },
+      h1: { "font-size": "1.5rem", "margin-top": "1rem" },
+      h2: { "font-size": "1.25rem" },
+      h3: { "font-size": "1.05rem" },
       blockquote: {
         "border-left": "2px solid rgba(123,45,38,0.4)",
         "padding-left": "0.75rem",
@@ -260,7 +273,7 @@ export function EPUBReader({
         </div>
       </div>
 
-      <div className="relative h-[calc(100vh-220px)] min-h-[480px] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg md:h-[calc(100vh-200px)]">
+      <div className="epub-container relative h-[calc(100vh-220px)] min-h-[480px] w-full overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper-lg md:h-[calc(100vh-200px)]">
       <ReactReader
         url={url}
         location={location}

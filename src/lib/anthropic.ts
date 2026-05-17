@@ -116,10 +116,56 @@ ${langs}
 - authors: array of full author names
 - description: 2–4 sentence summary that respects the book's actual content
 - publisher, publication_year, page_count: best-known values
-- isbn_13: the canonical 13-digit ISBN if you know it confidently, otherwise omit
-- why_this_book: 2–3 sentence curator's note, written in second person directly
-  to the reader ("This book gives you ___, especially if ___."). Avoid
-  marketing language. Be specific about what changes for the reader.
+- isbn_13: the 13-digit ISBN of the most common edition you know of. ISBN is
+  hard to remember exactly, but a near-correct guess is FAR more useful than
+  no guess at all — we run additional validation downstream and discard wrong
+  ones. So please make a confident attempt for any reasonably well-known book.
+  Omit only if you genuinely have no idea what edition this would be.
+
+# why_this_book — the most important field
+
+This is a curator's personal note to the reader, NOT a summary. The description
+field above is the summary. This field answers a different question:
+
+  "Why should I spend my finite time reading THIS book?"
+
+Write 4–6 sentences in second person, conversational and direct, like a
+thoughtful friend telling you why you should read something. Be specific about
+who needs this book now, and what shifts in them after reading it. What
+worldview gets challenged? What permission or framework gets unlocked? What
+dangerous comfort gets disturbed?
+
+DO NOT:
+  - Summarize the book's content (that's what description is for)
+  - Use marketing language like "must-read", "life-changing", "transformative"
+  - Use phrases like "essential reading", "ground-breaking", "powerful"
+  - Open with the book's name or the author's name
+  - Open with "This book..." (overused, lazy)
+
+DO:
+  - Speak to a specific stakes-laden situation the reader might be in
+  - Name the actual shift the book produces in your thinking
+  - Be willing to be slightly opinionated — curators have taste
+  - Sound like a person talking, not a press release
+
+Examples of the tone we want:
+
+  - "Most habit books treat you like a project to optimize. Clear treats you
+    like a person who's already trying their best with bad maps. The reframe —
+    that you don't rise to your goals, you fall to your systems — is one of
+    those ideas that gets quieter and more useful the longer you sit with it.
+    Read it when productivity advice has started to feel like its own kind of
+    procrastination."
+
+  - "Read this when you've been busy without being productive for so long
+    that you've stopped trusting the difference. Newport gives you a way to
+    feel that difference again — not in your calendar but in your nervous
+    system. The chapter on Roosevelt dashes alone is worth the price."
+
+  - "The book to give your younger self who thinks success is a math problem.
+    Covey's habits aren't tactics; they're the kind of foundational moves
+    that make everything else you'll learn either work or not work. The
+    'sharpen the saw' principle has saved me from at least three burnouts."
 
 # Output format
 
@@ -165,6 +211,46 @@ function stripFences(s: string): string {
 }
 
 /**
+ * Call Anthropic with retry-on-429 (rate limit) using exponential backoff.
+ * Tier 1 accounts have ~5 RPM on Sonnet — bulk imports of 10+ books hit this
+ * routinely. We retry up to 5 times with backoff before giving up, which gets
+ * a ~1-minute book through reliably.
+ */
+async function callAnthropic(
+  body: object,
+  apiKey: string,
+): Promise<Response> {
+  let lastErr = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status !== 429 && res.status !== 529) return res;
+
+    // 429 (rate limit) or 529 (overloaded) — back off and retry.
+    lastErr = await res.text().catch(() => "");
+    // Prefer the server's hint if present, else exponential backoff capped at 30s.
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const fallback = Math.min(2 ** attempt * 1000 + Math.random() * 1000, 30_000);
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : fallback;
+    console.warn(
+      `[anthropic] ${res.status} on attempt ${attempt + 1}, waiting ${Math.round(waitMs / 1000)}s`,
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  throw new Error(`Anthropic rate-limited after 5 attempts. Last body: ${lastErr.slice(0, 200)}`);
+}
+
+/**
  * Call Anthropic with a tight system prompt and a JSON-only user message.
  * Returns the parsed JSON object or throws on failure.
  */
@@ -180,26 +266,16 @@ export async function classifyBook(
 
   const body = {
     model: MODEL,
-    max_tokens: 2000,
+    max_tokens: 3000,
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: buildUserPrompt(input) }],
   };
 
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify(body),
-  });
+  const res = await callAnthropic(body, apiKey);
 
   if (!res.ok) {
     const errBody = await res.text();
-    throw new Error(
-      `Anthropic API ${res.status}: ${errBody.slice(0, 300)}`,
-    );
+    throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
   }
 
   const data = (await res.json()) as {

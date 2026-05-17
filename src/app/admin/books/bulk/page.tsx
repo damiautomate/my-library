@@ -16,6 +16,7 @@ import {
   X as XIcon,
   Globe,
   Search,
+  Send,
 } from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
@@ -38,6 +39,7 @@ type RowStatus =
   | "ai_filling"
   | "saving"
   | "done"
+  | "published"
   | "failed";
 
 interface Row {
@@ -460,9 +462,47 @@ function BulkContent() {
     setRunning(false);
   }, [mode, pasted, files, pendingSources, processOne]);
 
+  /** Publish all rows that finished successfully in this bulk run. */
+  const publishAllDone = useCallback(async () => {
+    const ids = rows
+      .filter((r) => r.status === "done" && r.bookId)
+      .map((r) => r.bookId as string);
+    if (ids.length === 0) return;
+    if (
+      !confirm(
+        `Publish ${ids.length} book${ids.length === 1 ? "" : "s"}? They'll become visible to all members immediately.`,
+      )
+    )
+      return;
+    try {
+      const u = firebaseAuth.currentUser;
+      if (!u) throw new Error("Not signed in");
+      const token = await u.getIdToken();
+      const res = await fetch("/api/books/bulk-update", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ book_ids: ids, status: "published" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Bulk publish failed");
+      setRows((prev) =>
+        prev.map((r) =>
+          r.status === "done" && r.bookId ? { ...r, status: "published" } : r,
+        ),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`Couldn't publish: ${msg}`);
+    }
+  }, [rows]);
+
   const queuedCount = rows.filter((r) => r.status === "queued").length;
   const doneCount = rows.filter((r) => r.status === "done").length;
   const failedCount = rows.filter((r) => r.status === "failed").length;
+  const publishedCount = rows.filter((r) => r.status === "published").length;
   const inputCount =
     mode === "titles"
       ? pasted.split("\n").filter((l) => l.trim()).length
@@ -803,12 +843,17 @@ https://standardebooks.org/ebooks/sun-tzu/the-art-of-war/lionel-giles`}
       {/* Progress table */}
       {rows.length > 0 && (
         <section className="ml-card overflow-hidden">
-          <header className="flex items-center justify-between border-b ml-hairline px-5 py-3">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b ml-hairline px-5 py-3">
             <h2 className="font-display text-lg">Progress</h2>
             <div className="flex items-center gap-2 font-mono text-[0.65rem] uppercase tracking-[0.15em]">
               {doneCount > 0 && (
                 <span className="ml-chip ml-chip--forest">
                   ✓ {doneCount} done
+                </span>
+              )}
+              {publishedCount > 0 && (
+                <span className="ml-chip ml-chip--accent">
+                  ↑ {publishedCount} published
                 </span>
               )}
               {failedCount > 0 && (
@@ -817,6 +862,16 @@ https://standardebooks.org/ebooks/sun-tzu/the-art-of-war/lionel-giles`}
                 </span>
               )}
               {queuedCount > 0 && <span className="ml-chip">… {queuedCount} queued</span>}
+              {doneCount > 0 && !running && (
+                <button
+                  type="button"
+                  onClick={() => void publishAllDone()}
+                  className="ml-2 inline-flex items-center gap-1 rounded-sm border border-oxblood-700 bg-oxblood-600 px-3 py-1 font-medium text-parchment-50 hover:bg-oxblood-700"
+                >
+                  <Send size={11} />
+                  Publish {doneCount}
+                </button>
+              )}
             </div>
           </header>
           <ul className="divide-y divide-ink-500/10">
@@ -1023,6 +1078,12 @@ function StatusBadge({
       <span className="ml-chip ml-chip--forest">
         <CheckCircle2 size={10} />
         {filledKeys !== undefined ? ` ${filledKeys} fields` : " Done"}
+      </span>
+    );
+  if (status === "published")
+    return (
+      <span className="ml-chip ml-chip--accent">
+        <Send size={10} /> Published
       </span>
     );
   return (

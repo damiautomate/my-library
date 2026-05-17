@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Library, Users, MailPlus, BookOpen, Plus } from "lucide-react";
+import { Library, Users, MailPlus, BookOpen, Plus, Layers } from "lucide-react";
 import { collection, getCountFromServer, query, where } from "firebase/firestore";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
@@ -77,12 +77,18 @@ function AdminDashboard() {
       </section>
 
       {/* Quick links */}
-      <section className="mt-12 grid grid-cols-1 gap-5 md:grid-cols-3">
+      <section className="mt-12 grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-4">
         <QuickLink
           href="/admin/books"
           icon={<Library size={18} />}
           title="Manage books"
           body="Browse the full catalogue, edit any entry, change status."
+        />
+        <QuickLink
+          href="/admin/books/bulk"
+          icon={<Layers size={18} />}
+          title="Bulk import"
+          body="Add many books at once — by titles, PDFs, or public-domain sources."
         />
         <QuickLink
           href="/admin/invitations"

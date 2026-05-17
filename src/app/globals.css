@@ -132,3 +132,28 @@
     padding: 0.3rem 0;
   }
 }
+
+/* ----- EPUB reader (react-reader) overrides ------------------------------
+   react-reader wraps the iframe in a "swipeable" component with padding that
+   reserves space for next/prev tap targets. On mobile this wastes 60-80px of
+   precious horizontal space. Reclaim it. */
+.epub-container .reactReaderContainer__viewerHolder,
+.epub-container .swipeable {
+  padding-left: 14px !important;
+  padding-right: 14px !important;
+}
+@media (max-width: 640px) {
+  .epub-container .reactReaderContainer__viewerHolder,
+  .epub-container .swipeable {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
+
+/* The internal arrow buttons get pushed off-screen on mobile; hide them so
+   the toolbar arrows are the canonical nav (cleaner UI). */
+@media (max-width: 640px) {
+  .epub-container .arrow {
+    display: none !important;
+  }
+}

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Edit, Archive, Plus, Eye, Layers } from "lucide-react";
+import { Edit, Archive, Plus, Eye, Layers, Send } from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
 import { SearchBar, matchesQuery } from "@/components/library/SearchBar";
@@ -25,6 +25,8 @@ function AdminBooksContent() {
   const [statusFilter, setStatusFilter] = useState<BookStatus | "all">("all");
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   useEffect(() => {
     load();
@@ -43,9 +45,65 @@ function AdminBooksContent() {
     await load();
   }
 
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   const filtered = books
     .filter((b) => (statusFilter === "all" ? true : b.status === statusFilter))
     .filter((b) => matchesQuery(b, q));
+
+  function toggleAllVisible() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allSelected = filtered.every((b) => next.has(b.id));
+      if (allSelected) {
+        for (const b of filtered) next.delete(b.id);
+      } else {
+        for (const b of filtered) next.add(b.id);
+      }
+      return next;
+    });
+  }
+
+  async function bulkSet(status: BookStatus) {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const verb =
+      status === "published"
+        ? "Publish"
+        : status === "archived"
+          ? "Archive"
+          : "Set to draft";
+    if (!confirm(`${verb} ${ids.length} book${ids.length === 1 ? "" : "s"}?`)) return;
+    setBulkBusy(true);
+    try {
+      const u = (await import("@/lib/firebase/client")).auth.currentUser;
+      if (!u) throw new Error("Not signed in");
+      const token = await u.getIdToken();
+      const res = await fetch("/api/books/bulk-update", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ book_ids: ids, status }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Bulk update failed");
+      setSelected(new Set());
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   return (
     <main className="mx-auto max-w-6xl px-6 pb-24 pt-12">
@@ -94,6 +152,50 @@ function AdminBooksContent() {
         </div>
       </div>
 
+      {/* Bulk action bar — appears when 1+ books selected */}
+      {selected.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-sm border border-oxblood-600/40 bg-oxblood-50 px-4 py-3 shadow-paper">
+          <div className="flex items-center gap-3">
+            <p className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-oxblood-700">
+              {selected.size} selected
+            </p>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500 hover:text-oxblood-700"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void bulkSet("published")}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-forest-600/60 bg-forest-50 px-3 py-1.5 text-xs text-forest-600 hover:bg-forest-50/70 disabled:opacity-50"
+            >
+              <Send size={12} /> Publish
+            </button>
+            <button
+              type="button"
+              onClick={() => void bulkSet("draft")}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-3 py-1.5 text-xs text-ink-700 hover:bg-parchment-100 disabled:opacity-50"
+            >
+              Unpublish
+            </button>
+            <button
+              type="button"
+              onClick={() => void bulkSet("archived")}
+              disabled={bulkBusy}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-3 py-1.5 text-xs text-oxblood-700 hover:bg-oxblood-50 disabled:opacity-50"
+            >
+              <Archive size={12} /> Archive
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="ml-card overflow-hidden">
         {loading ? (
@@ -119,6 +221,18 @@ function AdminBooksContent() {
           <table className="w-full text-sm">
             <thead className="border-b ml-hairline bg-parchment-100 font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-600">
               <tr>
+                <th className="w-8 px-3 py-3 text-left">
+                  <input
+                    type="checkbox"
+                    checked={
+                      filtered.length > 0 &&
+                      filtered.every((b) => selected.has(b.id))
+                    }
+                    onChange={toggleAllVisible}
+                    className="cursor-pointer accent-oxblood-600"
+                    aria-label="Select all visible"
+                  />
+                </th>
                 <th className="px-4 py-3 text-left">Title</th>
                 <th className="px-4 py-3 text-left">Authors</th>
                 <th className="px-4 py-3 text-left">Room</th>
@@ -130,8 +244,20 @@ function AdminBooksContent() {
               {filtered.map((b) => (
                 <tr
                   key={b.id}
-                  className="border-b ml-hairline last:border-b-0 hover:bg-parchment-100/60"
+                  className={
+                    "border-b ml-hairline last:border-b-0 hover:bg-parchment-100/60 " +
+                    (selected.has(b.id) ? "bg-oxblood-50/40" : "")
+                  }
                 >
+                  <td className="px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(b.id)}
+                      onChange={() => toggleOne(b.id)}
+                      className="cursor-pointer accent-oxblood-600"
+                      aria-label={`Select ${b.title}`}
+                    />
+                  </td>
                   <td className="px-4 py-3">
                     <div className="font-display text-base leading-tight">
                       {b.title}

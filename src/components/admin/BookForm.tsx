@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Search as SearchIcon,
   Sparkles,
@@ -497,6 +497,21 @@ function IsbnFetcher({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
+
+  // Auto-fetch when the user has typed a valid ISBN (after a 1.5s debounce).
+  // No need to click the Auto-fill button manually.
+  useEffect(() => {
+    const clean = isbn.replace(/[^0-9Xx]/g, "");
+    if (clean.length !== 10 && clean.length !== 13) return;
+    if (busy) return;
+    // If we already fetched this exact ISBN once, don't re-fetch.
+    if (source && (value.isbn_13 === clean || value.isbn_10 === clean)) return;
+    const timer = setTimeout(() => {
+      void fetchIt();
+    }, 1500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isbn]);
 
   async function fetchIt() {
     setErr(null);

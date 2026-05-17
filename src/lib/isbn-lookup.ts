@@ -56,10 +56,6 @@ function googleVolumeToResult(
 ): IsbnLookupResult {
   const { isbn_10, isbn_13 } = pickIsbns(v.industryIdentifiers ?? []);
   const year = v.publishedDate?.match(/^(\d{4})/)?.[1];
-  const cover = (v.imageLinks?.thumbnail ?? v.imageLinks?.smallThumbnail)?.replace(
-    /^http:/,
-    "https:",
-  );
   return {
     title: v.title,
     subtitle: v.subtitle,
@@ -71,9 +67,32 @@ function googleVolumeToResult(
     language: v.language,
     isbn_10,
     isbn_13,
-    cover_url: cover,
+    cover_url: bestCoverUrl(isbn_13 ?? isbn_10, v.imageLinks),
     source,
   };
+}
+
+/**
+ * Cover-url selection. Priority order:
+ *   1. Open Library's ISBN-based -L (large) endpoint — ~500-1000px, reliable
+ *   2. Google Books' thumbnail with the &edge=curl crop removed
+ *
+ * The OL service has been the de-facto book-cover CDN for a decade. It serves
+ * a tiny placeholder for missing ISBNs, but for any book actually in OL's
+ * dataset (which is nearly every well-known book), it returns a full-size
+ * cover. Much better than Google Books' default 128px thumbnail.
+ */
+export function bestCoverUrl(
+  isbn: string | undefined,
+  imageLinks?: { thumbnail?: string; smallThumbnail?: string },
+): string | undefined {
+  if (isbn) {
+    const clean = isbn.replace(/[^0-9X]/gi, "");
+    if (clean) return `https://covers.openlibrary.org/b/isbn/${clean}-L.jpg`;
+  }
+  const t = imageLinks?.thumbnail ?? imageLinks?.smallThumbnail;
+  if (!t) return undefined;
+  return t.replace(/^http:/, "https:").replace(/&edge=curl/g, "");
 }
 
 async function tryGoogleBooks(
@@ -127,12 +146,18 @@ async function tryOpenLibraryIsbn(
     description?: string | { value?: string };
   };
   const year = v.publish_date?.match(/(\d{4})/)?.[1];
-  const cover = v.covers?.[0]
-    ? `https://covers.openlibrary.org/b/id/${v.covers[0]}-L.jpg`
-    : undefined;
   const desc =
     typeof v.description === "string" ? v.description : v.description?.value;
   const lang = v.languages?.[0]?.key?.split("/").pop();
+
+  // Prefer the ISBN-based cover URL since it's a stable identifier; fall back
+  // to the OL-specific covers/id/N endpoint if we have a numeric cover id.
+  const isbn13 = v.isbn_13?.[0];
+  const isbn10 = v.isbn_10?.[0];
+  let cover = bestCoverUrl(isbn13 ?? isbn10);
+  if (!cover && v.covers?.[0]) {
+    cover = `https://covers.openlibrary.org/b/id/${v.covers[0]}-L.jpg`;
+  }
 
   let authors: string[] | undefined;
   if (v.authors && v.authors.length) {
@@ -196,6 +221,8 @@ async function tryOpenLibraryData(
 
   const year = v.publish_date?.match(/(\d{4})/)?.[1];
   const notes = typeof v.notes === "string" ? v.notes : v.notes?.value;
+  const isbn13 = v.identifiers?.isbn_13?.[0];
+  const isbn10 = v.identifiers?.isbn_10?.[0];
   return {
     title: v.title,
     subtitle: v.subtitle,
@@ -203,9 +230,13 @@ async function tryOpenLibraryData(
     publisher: v.publishers?.[0]?.name,
     publication_year: year ? Number(year) : undefined,
     page_count: v.number_of_pages,
-    cover_url: v.cover?.large ?? v.cover?.medium ?? v.cover?.small,
-    isbn_10: v.identifiers?.isbn_10?.[0],
-    isbn_13: v.identifiers?.isbn_13?.[0],
+    cover_url:
+      bestCoverUrl(isbn13 ?? isbn10) ??
+      v.cover?.large ??
+      v.cover?.medium ??
+      v.cover?.small,
+    isbn_10: isbn10,
+    isbn_13: isbn13,
     description: notes,
     source: "open_library_data",
   };
