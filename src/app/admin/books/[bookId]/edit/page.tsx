@@ -12,7 +12,6 @@ import {
   type BookFormValue,
 } from "@/components/admin/BookForm";
 import { Button } from "@/components/ui/Button";
-import { ConversionActions } from "@/components/admin/ConversionActions";
 import { getBook, updateBook, deleteBookForever } from "@/lib/books";
 import type { Book, BookStatus } from "@/lib/types";
 
@@ -100,15 +99,6 @@ function EditBookContent() {
         <div className="mb-5 rounded-sm border border-oxblood-600/40 bg-oxblood-50 px-4 py-3 text-sm text-oxblood-700">
           {error}
         </div>
-      )}
-
-      {book && (
-        <ConversionActions
-          book={book}
-          onChanged={() => {
-            if (bookId) getBook(bookId).then((b) => b && setBook(b));
-          }}
-        />
       )}
 
       <BookForm
