@@ -3,10 +3,13 @@
 import type { ReadingProgressDoc } from "@/lib/types";
 import { BookOpen, Bookmark, Check, Pause, X } from "lucide-react";
 
-const STATUS_META: Record<
-  ReadingProgressDoc["status"],
-  { label: string; tone: string; Icon: typeof BookOpen }
-> = {
+interface StatusMeta {
+  label: string;
+  tone: string;
+  Icon: typeof BookOpen;
+}
+
+const STATUS_META: Record<ReadingProgressDoc["status"], StatusMeta> = {
   want_to_read: {
     label: "Want to read",
     tone: "ml-chip ml-chip--gold",
@@ -22,13 +25,25 @@ const STATUS_META: Record<
   abandoned: { label: "Abandoned", tone: "ml-chip", Icon: X },
 };
 
+/**
+ * Fallback used when a progress doc has a status we don't recognize (e.g.
+ * older docs from before the status field existed, or docs written by some
+ * future code path with new values we haven't taught the UI yet). Without
+ * this fallback, reading `.tone` on undefined crashes the whole page.
+ */
+const FALLBACK_META: StatusMeta = {
+  label: "In progress",
+  tone: "ml-chip",
+  Icon: BookOpen,
+};
+
 interface ReadingProgressProps {
   progress: ReadingProgressDoc | null | undefined;
 }
 
 export function ReadingProgress({ progress }: ReadingProgressProps) {
   if (!progress) return null;
-  const meta = STATUS_META[progress.status];
+  const meta = STATUS_META[progress.status] ?? FALLBACK_META;
   const pct = progress.current_percent ?? 0;
 
   return (

@@ -272,7 +272,7 @@ function AdminBooksContent() {
                     {b.authors?.join(", ")}
                   </td>
                   <td className="px-4 py-3 font-mono text-[0.7rem] text-oxblood-700">
-                    {b.rooms?.[0] ? ROOMS[b.rooms[0]].label : "—"}
+                    {b.rooms?.[0] ? ROOMS[b.rooms[0]]?.label ?? b.rooms[0] : "—"}
                   </td>
                   <td className="px-4 py-3">
                     <StatusPill status={b.status} />

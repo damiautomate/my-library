@@ -246,21 +246,26 @@ export const LANGUAGES: Record<string, string> = {
 // ------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------
-export function domainLabel(key: LifeDomain): string {
-  return LIFE_DOMAINS[key];
+// All take `string` instead of the strict union types because the value
+// usually comes from Firestore — old documents may have legacy keys no
+// longer in the type union. Falling back to the raw key keeps the UI
+// rendering instead of crashing the entire page.
+
+export function domainLabel(key: string): string {
+  return LIFE_DOMAINS[key as LifeDomain] ?? key;
 }
-export function stageLabel(key: LifeStage): string {
-  return LIFE_STAGES[key];
+export function stageLabel(key: string): string {
+  return LIFE_STAGES[key as LifeStage] ?? key;
 }
-export function roomLabel(key: Room): string {
-  return ROOMS[key].label;
+export function roomLabel(key: string): string {
+  return ROOMS[key as Room]?.label ?? key;
 }
-export function levelLabel(key: ReaderLevel): string {
-  return READER_LEVELS[key];
+export function levelLabel(key: string): string {
+  return READER_LEVELS[key as ReaderLevel] ?? key;
 }
-export function modeLabel(key: ReadingMode): string {
-  return READING_MODES[key];
+export function modeLabel(key: string): string {
+  return READING_MODES[key as ReadingMode] ?? key;
 }
-export function contextLabel(key: CulturalContext): string {
-  return CULTURAL_CONTEXTS[key];
+export function contextLabel(key: string): string {
+  return CULTURAL_CONTEXTS[key as CulturalContext] ?? key;
 }

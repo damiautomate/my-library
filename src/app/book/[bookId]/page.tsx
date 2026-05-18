@@ -169,7 +169,7 @@ function BookDetailContent() {
 
         {/* Title block + actions */}
         <div className="md:col-span-8">
-          {book.rooms?.[0] && (
+          {book.rooms?.[0] && ROOMS[book.rooms[0]] && (
             <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
               {ROOMS[book.rooms[0]].label}
             </p>
@@ -308,35 +308,37 @@ function BookDetailContent() {
           <ClassRow label="Rooms">
             {book.rooms?.map((r) => (
               <Tag key={r} tone="accent">
-                {ROOMS[r].label}
+                {ROOMS[r]?.label ?? r}
               </Tag>
             ))}
           </ClassRow>
           <ClassRow label="Life Domains">
             {book.life_domains?.map((d) => (
-              <Tag key={d}>{LIFE_DOMAINS[d]}</Tag>
+              <Tag key={d}>{LIFE_DOMAINS[d] ?? d}</Tag>
             ))}
           </ClassRow>
           <ClassRow label="Life Stages">
             {book.life_stages?.map((s) => (
               <Tag key={s} tone="forest">
-                {LIFE_STAGES[s]}
+                {LIFE_STAGES[s] ?? s}
               </Tag>
             ))}
           </ClassRow>
           <ClassRow label="Reader Level">
             {book.reader_level && (
-              <Tag tone="gold">{READER_LEVELS[book.reader_level]}</Tag>
+              <Tag tone="gold">
+                {READER_LEVELS[book.reader_level] ?? book.reader_level}
+              </Tag>
             )}
           </ClassRow>
           <ClassRow label="Reading Modes">
             {book.reading_modes?.map((m) => (
-              <Tag key={m}>{READING_MODES[m]}</Tag>
+              <Tag key={m}>{READING_MODES[m] ?? m}</Tag>
             ))}
           </ClassRow>
           <ClassRow label="Cultural Contexts">
             {book.cultural_contexts?.map((c) => (
-              <Tag key={c}>{CULTURAL_CONTEXTS[c]}</Tag>
+              <Tag key={c}>{CULTURAL_CONTEXTS[c] ?? c}</Tag>
             ))}
           </ClassRow>
           {book.outcomes && book.outcomes.length > 0 && (
