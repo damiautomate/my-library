@@ -16,6 +16,7 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronRight as ChevronRightSmall,
+  Headphones,
   Highlighter,
   List,
   Loader2,
@@ -39,6 +40,12 @@ interface PDFReaderProps {
   /** Called when the user advances to a new page. Used by the parent reader
    * page to keep the live page in sync across PDF/Voice/EPUB tabs. */
   onPageChange?: (page: number) => void;
+  /** Page currently being narrated by the voice reader. When this changes,
+   * the PDF auto-jumps to follow along — so a user reading on the PDF tab
+   * while voice plays in the background sees pages flip as the narration
+   * advances. A small "Following voice" chip in the toolbar makes this
+   * obvious. Pass null to disable following. */
+  currentReadingPage?: number | null;
 }
 
 /** Flattened TOC node — what we render in the sidebar. */
@@ -68,6 +75,7 @@ export function PDFReader({
   initialPage,
   onPercentChange,
   onPageChange,
+  currentReadingPage,
 }: PDFReaderProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState<number>(initialPage ?? 1);
@@ -191,6 +199,33 @@ export function PDFReader({
     },
     [numPages, persistProgress],
   );
+
+  // Follow the voice reader. When voice is playing in the background and
+  // narration advances to a new page, currentReadingPage changes — we jump
+  // to that page so the user, who's reading on the PDF tab, sees the page
+  // flip in lock-step with the audio. We track the last-followed page in a
+  // ref to avoid re-navigating when the voice reader emits the same page
+  // twice (it can, e.g. on re-renders or external page sync).
+  const lastFollowedPageRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (currentReadingPage == null) {
+      // Voice stopped or paused — release the follow lock so user navigation
+      // isn't interfered with.
+      lastFollowedPageRef.current = null;
+      return;
+    }
+    if (currentReadingPage === lastFollowedPageRef.current) return;
+    if (currentReadingPage === page) {
+      // Already on it — just record so we don't try to re-navigate.
+      lastFollowedPageRef.current = currentReadingPage;
+      return;
+    }
+    if (!numPages) return; // doc not loaded yet
+    lastFollowedPageRef.current = currentReadingPage;
+    const clamped = Math.max(1, Math.min(numPages, currentReadingPage));
+    setPage(clamped);
+    persistProgress(clamped);
+  }, [currentReadingPage, page, numPages, persistProgress]);
 
   // ----- Keyboard nav -----------------------------------------------------
   useEffect(() => {
@@ -401,6 +436,15 @@ export function PDFReader({
           >
             <ChevronRight size={16} />
           </button>
+          {currentReadingPage != null && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-forest-50 px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-700"
+              title="The voice reader is playing — the PDF is following along page-by-page"
+            >
+              <Headphones size={11} />
+              Following voice · pg {currentReadingPage}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1">

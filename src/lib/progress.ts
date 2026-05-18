@@ -45,6 +45,10 @@ export interface SavePayload {
   current_percent?: number;
   current_cfi?: string;
   current_audio_seconds?: number;
+  /** Exact voice position — segment index + seconds within that segment. Used
+   * to restore the audio element to the precise pause point on next mount. */
+  current_voice_segment_index?: number;
+  current_voice_seconds?: number;
 }
 
 /**

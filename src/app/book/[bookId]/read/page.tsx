@@ -188,6 +188,7 @@ function ReadContent() {
             userId={firebaseUser.uid}
             bookId={book.id}
             initialPage={livePage ?? progress?.current_page}
+            currentReadingPage={voicePage}
             onPercentChange={setLivePct}
             onPageChange={setLivePage}
           />
@@ -217,6 +218,8 @@ function ReadContent() {
               userId={firebaseUser.uid}
               bookId={book.id}
               initialPage={livePage ?? progress?.current_page}
+              initialSegmentIndex={progress?.current_voice_segment_index}
+              initialSeconds={progress?.current_voice_seconds}
               externalPage={mode === "voice" ? undefined : livePage}
               totalPages={book.page_count ?? undefined}
               onPercentChange={setLivePct}

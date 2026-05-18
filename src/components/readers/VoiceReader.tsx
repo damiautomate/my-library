@@ -4,11 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Pause,
   Play,
+  Rewind,
+  FastForward,
   RotateCcw,
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { makeDebouncedSaver } from "@/lib/progress";
+import { makeDebouncedSaver, saveProgress } from "@/lib/progress";
 import type { VoiceSegment } from "@/lib/types";
 
 interface VoiceReaderProps {
@@ -24,6 +26,13 @@ interface VoiceReaderProps {
    * realign the playback segment to match. We never realign while voice is
    * the active tab — that would interrupt listening. */
   externalPage?: number | null;
+  /** Exact segment index to resume from. Takes precedence over initialPage —
+   * if set, we restore to this segment regardless of where initialPage maps. */
+  initialSegmentIndex?: number;
+  /** Exact seconds within initialSegmentIndex to seek to on first audio load.
+   * This is the key field for precise pause/resume — without it, the audio
+   * always starts at the beginning of the segment. */
+  initialSeconds?: number;
   onPercentChange?: (pct: number) => void;
   /** Called as voice narration advances through pages. Also fires when the
    * user manually skips/scrubs. Used for cross-tab progress sync. */
@@ -34,6 +43,8 @@ interface VoiceReaderProps {
    * removed. */
   onNarratingPage?: (page: number | null) => void;
 }
+
+const NUDGE_SECONDS = 10;
 
 function fmt(sec: number): string {
   if (!isFinite(sec) || sec < 0) return "0:00";
@@ -65,17 +76,43 @@ export function VoiceReader({
   initialPage = 1,
   totalPages,
   externalPage,
+  initialSegmentIndex,
+  initialSeconds,
   onPercentChange,
   onPageChange,
   onNarratingPage,
 }: VoiceReaderProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const [segIdx, setSegIdx] = useState(() => segmentForPage(segments, initialPage));
+
+  // Resolve the starting segment. If we have a saved exact segment index,
+  // trust it (so audio resumes precisely). Otherwise compute from initialPage,
+  // which is the cross-tab-sync fallback.
+  const startSeg = useMemo(() => {
+    if (
+      initialSegmentIndex !== undefined &&
+      initialSegmentIndex >= 0 &&
+      initialSegmentIndex < segments.length
+    ) {
+      return initialSegmentIndex;
+    }
+    return segmentForPage(segments, initialPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // freeze at mount — never re-resolve
+
+  const [segIdx, setSegIdx] = useState(startSeg);
   const [playing, setPlaying] = useState(false);
-  const [position, setPosition] = useState(0); // seconds within current segment
+  const [position, setPosition] = useState(initialSeconds ?? 0);
   const [loading, setLoading] = useState(false);
   const [rate, setRate] = useState(1);
   const [error, setError] = useState<string | null>(null);
+
+  // The first time the audio element loads metadata for our starting segment,
+  // we seek it to initialSeconds. Tracked via ref so subsequent segment
+  // changes don't try to seek (they should start at 0). This is the key fix
+  // for "audio resumes at the start of the segment instead of exact pause".
+  const initialSeekRef = useRef<number | null>(
+    initialSeconds && initialSeconds > 0 ? initialSeconds : null,
+  );
 
   const saver = useMemo(
     () => makeDebouncedSaver(userId, bookId, 1500),
@@ -112,7 +149,12 @@ export function VoiceReader({
     );
   }, [current, position, initialPage]);
 
-  // Persist progress with the page tracking convention shared by PDF/EPUB
+  // Persist progress with the page tracking convention shared by PDF/EPUB.
+  // We persist FOUR fields here:
+  //   - current_page / current_percent  → cross-tab sync (PDF/EPUB use these)
+  //   - current_voice_segment_index / current_voice_seconds → exact restore
+  // The audio fields are what let us resume at the precise pause point. The
+  // page fields are an approximation good enough for "what page are we on?"
   useEffect(() => {
     if (!current) return;
     const pct =
@@ -126,8 +168,10 @@ export function VoiceReader({
     saver.save({
       current_page: currentPage,
       current_percent: pct,
+      current_voice_segment_index: segIdx,
+      current_voice_seconds: position,
     });
-  }, [currentPage, totalElapsed, totalDuration, totalPages, onPercentChange, onPageChange, saver, current]);
+  }, [currentPage, totalElapsed, totalDuration, totalPages, segIdx, position, onPercentChange, onPageChange, saver, current]);
 
   // Tell external readers (EPUB) when audio is actively playing AND what page
   // is being narrated. Clearing on pause removes any "follow along" highlight
@@ -163,13 +207,57 @@ export function VoiceReader({
     };
   }, [saver]);
 
-  // Set up audio element on segment change
+  // Protect against tab-close mid-playback. We use sendBeacon via the native
+  // `beforeunload` event because the debounced saver might still be waiting
+  // and fetch() during page unload is unreliable. saveProgress writes to
+  // Firestore directly — if the browser allows the request to complete in
+  // the unload window, the user's exact position is captured.
+  useEffect(() => {
+    const handler = () => {
+      const el = audioRef.current;
+      if (!el) return;
+      // Fire-and-forget; can't await during unload
+      void saveProgress(userId, bookId, {
+        current_voice_segment_index: segIdx,
+        current_voice_seconds: el.currentTime,
+        current_page: currentPage,
+      });
+    };
+    window.addEventListener("beforeunload", handler);
+    window.addEventListener("pagehide", handler);
+    return () => {
+      window.removeEventListener("beforeunload", handler);
+      window.removeEventListener("pagehide", handler);
+    };
+  }, [userId, bookId, segIdx, currentPage]);
+
+  // Set up audio element on segment change. On the very FIRST segment load
+  // (initial mount), we seek to initialSeconds — this is what makes audio
+  // resume precisely where the user paused last session. On subsequent
+  // segment changes (user clicks next, or auto-advance), we start at 0.
   useEffect(() => {
     const el = audioRef.current;
     if (!el || !current) return;
     el.src = current.url;
     el.playbackRate = rate;
-    setPosition(0);
+
+    const seekTo = initialSeekRef.current;
+    if (seekTo !== null && seekTo > 0) {
+      // We have an initial restore target. Seek on loadedmetadata so the
+      // duration is known and the seek is valid.
+      const onLoaded = () => {
+        try {
+          el.currentTime = seekTo;
+          setPosition(seekTo);
+        } catch {}
+        initialSeekRef.current = null; // only seek once
+        el.removeEventListener("loadedmetadata", onLoaded);
+      };
+      el.addEventListener("loadedmetadata", onLoaded);
+    } else {
+      setPosition(0);
+    }
+
     setError(null);
     if (playing) {
       el.play().catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -188,6 +276,21 @@ export function VoiceReader({
     if (playing) {
       el.pause();
       setPlaying(false);
+      // CRITICAL: on pause, write the exact position synchronously to
+      // Firestore. If we relied on the debounced saver, a user pausing and
+      // immediately closing the tab would lose 1.5s of progress and resume at
+      // the wrong spot. The saver merges this into pending state and flush()
+      // forces an immediate Firestore write.
+      saver.save({
+        current_voice_segment_index: segIdx,
+        current_voice_seconds: el.currentTime,
+        current_page: currentPage,
+      });
+      try {
+        await saver.flush();
+      } catch (err) {
+        console.warn("[voice] pause-save failed", err);
+      }
     } else {
       setLoading(true);
       try {
@@ -199,13 +302,92 @@ export function VoiceReader({
         setLoading(false);
       }
     }
-  }, [playing]);
+  }, [playing, segIdx, currentPage, saver]);
+
+  /**
+   * Nudge audio position by N seconds within the current segment. If the
+   * resulting position would cross a segment boundary, we transition to the
+   * adjacent segment instead (preserving the "extra" time as the position in
+   * the new segment, so 5s into seg 3 - 10s = -5s = 5s before the end of seg 2).
+   */
+  const nudgeBackward = useCallback(
+    (seconds: number) => {
+      const el = audioRef.current;
+      if (!el || !current) return;
+      const newPos = el.currentTime - seconds;
+      if (newPos >= 0) {
+        el.currentTime = newPos;
+        setPosition(newPos);
+        // Immediate save so refresh-during-pause never re-anchors backward
+        saver.save({
+          current_voice_segment_index: segIdx,
+          current_voice_seconds: newPos,
+        });
+        void saver.flush();
+      } else if (segIdx > 0) {
+        // Cross boundary backward: jump to end of previous segment minus overflow
+        const prevSeg = segments[segIdx - 1];
+        const targetPos = Math.max(0, (prevSeg.duration || 0) + newPos);
+        initialSeekRef.current = targetPos; // restore-on-load mechanism
+        setSegIdx(segIdx - 1);
+        saver.save({
+          current_voice_segment_index: segIdx - 1,
+          current_voice_seconds: targetPos,
+        });
+        void saver.flush();
+      } else {
+        // Already at the very beginning
+        el.currentTime = 0;
+        setPosition(0);
+      }
+    },
+    [current, segIdx, segments, saver],
+  );
+
+  const nudgeForward = useCallback(
+    (seconds: number) => {
+      const el = audioRef.current;
+      if (!el || !current) return;
+      const dur = current.duration || el.duration || 0;
+      const newPos = el.currentTime + seconds;
+      if (newPos <= dur || dur === 0) {
+        el.currentTime = newPos;
+        setPosition(newPos);
+        saver.save({
+          current_voice_segment_index: segIdx,
+          current_voice_seconds: newPos,
+        });
+        void saver.flush();
+      } else if (segIdx < segments.length - 1) {
+        // Cross boundary forward
+        const overflow = newPos - dur;
+        initialSeekRef.current = overflow;
+        setSegIdx(segIdx + 1);
+        saver.save({
+          current_voice_segment_index: segIdx + 1,
+          current_voice_seconds: overflow,
+        });
+        void saver.flush();
+      } else {
+        // At end of last segment
+        el.currentTime = dur;
+        setPosition(dur);
+      }
+    },
+    [current, segIdx, segments, saver],
+  );
 
   const skipForward = useCallback(() => {
     if (segIdx < segments.length - 1) {
-      setSegIdx(segIdx + 1);
+      const next = segIdx + 1;
+      setSegIdx(next);
+      saver.save({
+        current_voice_segment_index: next,
+        current_voice_seconds: 0,
+      });
+      void saver.flush();
     }
-  }, [segIdx, segments.length]);
+  }, [segIdx, segments.length, saver]);
 
   const skipBack = useCallback(() => {
     if (position > 3) {
@@ -214,17 +396,35 @@ export function VoiceReader({
       if (el) {
         el.currentTime = 0;
         setPosition(0);
+        saver.save({
+          current_voice_segment_index: segIdx,
+          current_voice_seconds: 0,
+        });
+        void saver.flush();
       }
     } else if (segIdx > 0) {
-      setSegIdx(segIdx - 1);
+      const prev = segIdx - 1;
+      setSegIdx(prev);
+      saver.save({
+        current_voice_segment_index: prev,
+        current_voice_seconds: 0,
+      });
+      void saver.flush();
     }
-  }, [segIdx, position]);
+  }, [segIdx, position, saver]);
 
   // Auto-advance to next segment when current ends
   function handleEnded() {
     if (segIdx < segments.length - 1) {
-      setSegIdx(segIdx + 1);
-      // Keep playing across segment boundary
+      const next = segIdx + 1;
+      setSegIdx(next);
+      // Persist the segment transition immediately so even a crash here
+      // doesn't roll us back
+      saver.save({
+        current_voice_segment_index: next,
+        current_voice_seconds: 0,
+      });
+      void saver.flush();
     } else {
       setPlaying(false);
     }
@@ -337,15 +537,25 @@ export function VoiceReader({
         })}
       </button>
 
-      {/* Controls */}
-      <div className="mt-5 flex items-center justify-center gap-4">
+      {/* Controls — 5-button row: prev-segment, -10s, play/pause, +10s, next-segment */}
+      <div className="mt-5 flex items-center justify-center gap-3">
         <button
           type="button"
           onClick={skipBack}
           className="rounded-full p-2 text-ink-700 hover:bg-parchment-100"
-          aria-label="Skip back"
+          aria-label="Previous segment"
+          title="Previous chapter / restart this one"
         >
           <SkipBack size={18} />
+        </button>
+        <button
+          type="button"
+          onClick={() => nudgeBackward(NUDGE_SECONDS)}
+          className="inline-flex items-center gap-1 rounded-sm border border-ink-500/20 bg-parchment-50 px-2.5 py-1.5 font-mono text-[0.65rem] uppercase tracking-[0.1em] text-ink-700 hover:bg-parchment-100"
+          aria-label="Rewind 10 seconds"
+          title="Rewind 10s"
+        >
+          <Rewind size={13} /> 10s
         </button>
         <button
           type="button"
@@ -358,10 +568,20 @@ export function VoiceReader({
         </button>
         <button
           type="button"
+          onClick={() => nudgeForward(NUDGE_SECONDS)}
+          className="inline-flex items-center gap-1 rounded-sm border border-ink-500/20 bg-parchment-50 px-2.5 py-1.5 font-mono text-[0.65rem] uppercase tracking-[0.1em] text-ink-700 hover:bg-parchment-100"
+          aria-label="Forward 10 seconds"
+          title="Forward 10s"
+        >
+          10s <FastForward size={13} />
+        </button>
+        <button
+          type="button"
           onClick={skipForward}
           disabled={segIdx >= segments.length - 1}
           className="rounded-full p-2 text-ink-700 hover:bg-parchment-100 disabled:opacity-30"
-          aria-label="Skip forward"
+          aria-label="Next segment"
+          title="Next chapter"
         >
           <SkipForward size={18} />
         </button>

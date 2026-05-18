@@ -177,6 +177,14 @@ export interface ReadingProgressDoc {
   current_percent?: number;
   current_cfi?: string;
   current_audio_seconds?: number;
+  /** Exact voice-reader restoration fields. current_page is a derived
+   * approximation (computed from segment progress) and is good for cross-tab
+   * sync, but it's not precise enough to resume audio at the exact pause point
+   * — so we also persist the segment we were on plus the seconds within that
+   * segment. The VoiceReader seeks the audio element to current_voice_seconds
+   * on first metadata-load, restoring the listener to the precise position. */
+  current_voice_segment_index?: number;
+  current_voice_seconds?: number;
 
   started_at?: Timestamp;
   last_read_at?: Timestamp;
