@@ -36,6 +36,9 @@ interface PDFReaderProps {
   bookId: string;
   initialPage?: number;
   onPercentChange?: (pct: number) => void;
+  /** Called when the user advances to a new page. Used by the parent reader
+   * page to keep the live page in sync across PDF/Voice/EPUB tabs. */
+  onPageChange?: (page: number) => void;
 }
 
 /** Flattened TOC node — what we render in the sidebar. */
@@ -64,6 +67,7 @@ export function PDFReader({
   bookId,
   initialPage,
   onPercentChange,
+  onPageChange,
 }: PDFReaderProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState<number>(initialPage ?? 1);
@@ -117,22 +121,28 @@ export function PDFReader({
       const pct = Math.round(((page - 1) / Math.max(1, info.numPages - 1)) * 100);
       onPercentChange?.(pct);
 
-      // Cache the doc handle so TOC entries can resolve their destinations
-      // (PDF outline entries reference destinations by name or array, both of
-      // which need the doc to convert into a page index).
+      // Cache the doc handle so TOC entries can resolve their destinations.
+      // CRITICAL: pdfjs methods are unbound — calling them outside their proxy
+      // loses `this` and they fail silently. Bind them to `info` here so the
+      // resolveOutline calls below actually work. Without the binding, all
+      // outline entries end up with `page = undefined` and the buttons in the
+      // sidebar render but do nothing on click.
       if (info.getOutline && info.getDestination && info.getPageIndex) {
+        const boundGetOutline = info.getOutline.bind(info);
+        const boundGetDestination = info.getDestination.bind(info);
+        const boundGetPageIndex = info.getPageIndex.bind(info);
         docRef.current = {
-          getOutline: info.getOutline,
-          getDestination: info.getDestination,
-          getPageIndex: info.getPageIndex,
+          getOutline: boundGetOutline,
+          getDestination: boundGetDestination,
+          getPageIndex: boundGetPageIndex,
         };
         try {
-          const raw = (await info.getOutline()) as RawOutlineItem[] | null;
+          const raw = (await boundGetOutline()) as RawOutlineItem[] | null;
           if (raw && raw.length > 0) {
             const resolved = await resolveOutline(
               raw,
-              info.getDestination,
-              info.getPageIndex,
+              boundGetDestination,
+              boundGetPageIndex,
             );
             setOutline(resolved);
           } else {
@@ -152,12 +162,13 @@ export function PDFReader({
       if (!numPages) return;
       const pct = Math.round(((newPage - 1) / Math.max(1, numPages - 1)) * 100);
       onPercentChange?.(pct);
+      onPageChange?.(newPage);
       saver.save({
         current_page: newPage,
         current_percent: pct,
       });
     },
-    [numPages, onPercentChange, saver],
+    [numPages, onPercentChange, onPageChange, saver],
   );
 
   const go = useCallback(

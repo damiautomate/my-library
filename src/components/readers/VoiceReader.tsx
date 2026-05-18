@@ -19,7 +19,14 @@ interface VoiceReaderProps {
   initialPage?: number;
   /** Total source-PDF page count, for percent calculations. */
   totalPages?: number;
+  /** Page set externally (e.g. user advanced in PDF tab). When this changes
+   * AND the voice reader is currently hidden (i.e. user is on PDF/EPUB), we
+   * realign the playback segment to match. We never realign while voice is
+   * the active tab — that would interrupt listening. */
+  externalPage?: number | null;
   onPercentChange?: (pct: number) => void;
+  /** Called as voice narration advances through pages. */
+  onPageChange?: (page: number) => void;
 }
 
 function fmt(sec: number): string {
@@ -51,7 +58,9 @@ export function VoiceReader({
   bookId,
   initialPage = 1,
   totalPages,
+  externalPage,
   onPercentChange,
+  onPageChange,
 }: VoiceReaderProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [segIdx, setSegIdx] = useState(() => segmentForPage(segments, initialPage));
@@ -106,11 +115,28 @@ export function VoiceReader({
           ? Math.round((totalElapsed / totalDuration) * 100)
           : 0;
     onPercentChange?.(pct);
+    onPageChange?.(currentPage);
     saver.save({
       current_page: currentPage,
       current_percent: pct,
     });
-  }, [currentPage, totalElapsed, totalDuration, totalPages, onPercentChange, saver, current]);
+  }, [currentPage, totalElapsed, totalDuration, totalPages, onPercentChange, onPageChange, saver, current]);
+
+  // React to external page updates: when the user advances pages in the PDF
+  // or EPUB tab, externalPage updates. We realign to the matching audio
+  // segment ONLY while paused — so we never interrupt active listening.
+  useEffect(() => {
+    if (externalPage == null) return;
+    if (playing) return; // never interrupt playback
+    if (!current) return;
+    // If the new page is already within the current segment's range, no realign
+    if (externalPage >= current.page_start && externalPage <= current.page_end) {
+      return;
+    }
+    const newIdx = segmentForPage(segments, externalPage);
+    if (newIdx !== segIdx) setSegIdx(newIdx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalPage]);
 
   // Cleanup pending saves on unmount
   useEffect(() => {

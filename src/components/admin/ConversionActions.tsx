@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Loader2, BookOpenCheck, Headphones, CheckCircle2 } from "lucide-react";
+import { useRef, useState } from "react";
+import { Loader2, BookOpenCheck, Headphones, CheckCircle2, X } from "lucide-react";
 import { auth as firebaseAuth } from "@/lib/firebase/client";
 import type { Book } from "@/lib/types";
 
@@ -27,6 +27,11 @@ export function ConversionActions({ book, onChanged }: Props) {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [voiceErr, setVoiceErr] = useState<string | null>(null);
+  const [voiceProgress, setVoiceProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const cancelVoiceRef = useRef(false);
 
   async function authHeader(): Promise<string> {
     const u = firebaseAuth.currentUser;
@@ -48,6 +53,13 @@ export function ConversionActions({ book, onChanged }: Props) {
         method: "POST",
         headers: { Authorization: await authHeader() },
       });
+      const ct = res.headers.get("content-type") ?? "";
+      if (!ct.includes("application/json")) {
+        const text = await res.text();
+        throw new Error(
+          `Server returned non-JSON (status ${res.status}). Likely a Vercel timeout. First 200 chars: ${text.slice(0, 200)}`,
+        );
+      }
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Conversion failed");
       setConvertResult(
@@ -62,34 +74,80 @@ export function ConversionActions({ book, onChanged }: Props) {
   }
 
   async function generateVoice() {
-    if (!confirm(
-      hasVoice
-        ? "Voice audio already exists. Re-generating will replace it. Continue?"
-        : "Generate voice audio for this book? Uses Google TTS. Can take 5-15 minutes and consume your TTS quota.",
-    )) return;
+    const reset = hasVoice;
+    if (
+      !confirm(
+        reset
+          ? "Voice audio already exists. Re-generating from scratch will replace it. Continue?"
+          : "Generate voice audio for this book? Uses Google TTS. Processes one ~10-page segment per HTTP call — you can leave this page open and it'll keep going. For a 300-page book expect ~30 segments at ~30-60s each.",
+      )
+    )
+      return;
     setVoiceBusy(true);
     setVoiceResult(null);
     setVoiceErr(null);
-    try {
-      const res = await fetch(`/api/books/${book.id}/generate-voice`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: await authHeader(),
-        },
-        body: JSON.stringify({ provider: "google" }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Voice generation failed");
+    setVoiceProgress(null);
+    cancelVoiceRef.current = false;
+
+    let done = false;
+    let totalChars = 0;
+    let firstCall = true;
+
+    while (!done) {
+      if (cancelVoiceRef.current) {
+        setVoiceErr("Stopped — partial segments saved on the book.");
+        break;
+      }
+      try {
+        const res = await fetch(`/api/books/${book.id}/generate-voice`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: await authHeader(),
+          },
+          body: JSON.stringify({
+            provider: "google",
+            // Wipe existing segments only on the very first call after the user
+            // confirmed a re-gen — subsequent calls in this loop are appends.
+            reset: firstCall && reset,
+          }),
+        });
+        firstCall = false;
+
+        // Vercel returns plain-text "An error occurred..." on timeout — guard
+        // against that so we don't crash with a JSON parse error.
+        const ct = res.headers.get("content-type") ?? "";
+        if (!ct.includes("application/json")) {
+          const text = await res.text();
+          throw new Error(
+            `Server returned non-JSON (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`,
+          );
+        }
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error ?? `Failed (status ${res.status})`);
+        }
+
+        setVoiceProgress({ done: data.processed, total: data.total });
+        if (data.segment) totalChars += data.segment.chars ?? 0;
+        done = !!data.done;
+      } catch (err) {
+        setVoiceErr(err instanceof Error ? err.message : String(err));
+        break;
+      }
+    }
+
+    if (done) {
       setVoiceResult(
-        `Generated ${data.segments} audio segments (${data.total_minutes} min total, ${data.characters.toLocaleString()} chars synthesized).`,
+        `Generation complete — ${voiceProgress?.total ?? "?"} segments, ${totalChars.toLocaleString()} characters synthesized.`,
       );
       onChanged?.();
-    } catch (err) {
-      setVoiceErr(err instanceof Error ? err.message : String(err));
-    } finally {
-      setVoiceBusy(false);
     }
+    setVoiceBusy(false);
+  }
+
+  function cancelVoice() {
+    cancelVoiceRef.current = true;
   }
 
   // Nothing to show if there's no PDF — both actions need one as source
@@ -161,18 +219,59 @@ export function ConversionActions({ book, onChanged }: Props) {
         </div>
         <button
           type="button"
-          onClick={generateVoice}
-          disabled={voiceBusy}
-          className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-3 py-1.5 text-xs text-ink-700 hover:bg-parchment-100 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={voiceBusy ? cancelVoice : generateVoice}
+          disabled={false}
+          className={
+            "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-xs disabled:opacity-50 " +
+            (voiceBusy
+              ? "border-oxblood-700 bg-oxblood-50 text-oxblood-700 hover:bg-oxblood-100"
+              : "border-ink-500/30 bg-parchment-50 text-ink-700 hover:bg-parchment-100")
+          }
         >
           {voiceBusy ? (
-            <Loader2 size={12} className="animate-spin" />
+            <>
+              <X size={12} /> Stop
+            </>
           ) : (
-            <Headphones size={12} />
+            <>
+              <Headphones size={12} />
+              {hasVoice ? "Re-generate" : "Generate voice"}
+            </>
           )}
-          {hasVoice ? "Re-generate" : "Generate voice"}
         </button>
       </div>
+      {voiceProgress && (
+        <div className="mt-3">
+          <div className="mb-1 flex items-center justify-between font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-600">
+            <span>
+              Segment {voiceProgress.done} of {voiceProgress.total}
+            </span>
+            <span>
+              {voiceProgress.total > 0
+                ? Math.round((voiceProgress.done / voiceProgress.total) * 100)
+                : 0}
+              %
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-parchment-200">
+            <div
+              className="h-full bg-oxblood-600 transition-all"
+              style={{
+                width: `${
+                  voiceProgress.total > 0
+                    ? Math.round((voiceProgress.done / voiceProgress.total) * 100)
+                    : 0
+                }%`,
+              }}
+            />
+          </div>
+          {voiceBusy && (
+            <p className="mt-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500">
+              Synthesizing next segment via Google TTS… keep this tab open.
+            </p>
+          )}
+        </div>
+      )}
       {voiceResult && (
         <p className="mt-2 text-xs text-forest-600">✓ {voiceResult}</p>
       )}

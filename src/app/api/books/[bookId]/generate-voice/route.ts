@@ -4,12 +4,15 @@ import { v2 as cloudinary } from "cloudinary";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
 import { extractPdfFull, type PdfPage } from "@/lib/pdf-extract";
 import { getProvider, chunkText, type TTSProviderId } from "@/lib/tts";
+import type { VoiceSegment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-// TTS generation can take a long time for big books. Vercel maxDuration on
-// free tier caps at 60s, Pro at 300s. We aim under 300s.
-export const maxDuration = 300;
+// Each call processes ONE segment, which keeps us well under Vercel's 60-second
+// hobby-tier limit (and far under the 300s pro limit). For a 450-page book this
+// means ~45 separate HTTP calls from the client — totally workable because the
+// client polls until done.
+export const maxDuration = 60;
 
 async function requireAdmin(req: NextRequest) {
   const authHeader = req.headers.get("authorization") ?? "";
@@ -44,14 +47,6 @@ function configureCloudinary() {
   });
 }
 
-/**
- * Group pages into "segments" of roughly N pages each. We synthesize one MP3
- * per segment. Reasoning:
- *   - Too few pages per segment → many MP3 files, slow to fetch + concat
- *   - Too many pages per segment → exceeds TTS char limit (5000), slow to
- *     re-fetch when seeking, big initial download
- *   - 10 pages is a comfortable middle ground for typical 300-word pages
- */
 const PAGES_PER_SEGMENT = 10;
 
 interface PageGroup {
@@ -78,15 +73,21 @@ interface RouteParams {
   params: { bookId: string };
 }
 
+interface RequestBody {
+  provider?: TTSProviderId;
+  /** Set to true to wipe existing voice_segments and start over. */
+  reset?: boolean;
+}
+
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const auth = await requireAdmin(req);
   if (auth instanceof NextResponse) return auth;
 
-  let body: { provider?: TTSProviderId } = {};
+  let body: RequestBody = {};
   try {
     body = await req.json();
   } catch {
-    // body is optional; default to google
+    // body is optional
   }
   const providerId: TTSProviderId = body.provider ?? "google";
 
@@ -117,7 +118,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Extract text
+  // Determine where to resume from. If `reset` is true, wipe and start fresh.
+  // Otherwise pick up from voice_segments.length (since segments are appended
+  // 1:1 with their index in the page-group list).
+  const existing: VoiceSegment[] =
+    !body.reset && Array.isArray(book.voice_segments)
+      ? book.voice_segments
+      : [];
+  const nextIndex = existing.length;
+
+  // Extract PDF — we have to do this every call because we don't cache the
+  // text. Takes 10-30s for big books. The bulk of each call's time budget.
   let extracted;
   try {
     extracted = await extractPdfFull(book.pdf_url);
@@ -131,131 +142,159 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   if (extracted.pages.filter((p) => p.text.trim()).length === 0) {
     return NextResponse.json(
       {
-        error: "This PDF has no extractable text (likely scanned images). OCR the PDF first.",
+        error:
+          "This PDF has no extractable text (likely scanned images). OCR the PDF first.",
       },
       { status: 422 },
     );
   }
 
-  // Group pages into segments
   const groups = groupPages(extracted.pages);
-  configureCloudinary();
+  const total = groups.length;
 
-  const segments: Array<{
-    index: number;
-    url: string;
-    page_start: number;
-    page_end: number;
-    duration: number;
-    chars: number;
-  }> = [];
-  let totalChars = 0;
-  let totalSeconds = 0;
-
-  for (let i = 0; i < groups.length; i++) {
-    const g = groups[i];
-    const rawText = g.pages
-      .map((p) => p.text)
-      .join("\n\n")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!rawText) continue;
-
-    // Most segments fit in one TTS call; if a 10-page segment is exceptionally
-    // dense and exceeds maxCharsPerCall, chunk it and concatenate the audio.
-    const chunks = chunkText(rawText, provider.maxCharsPerCall);
-    const buffers: Buffer[] = [];
-    let segDuration = 0;
-    let segChars = 0;
-
-    for (const chunk of chunks) {
-      try {
-        const r = await provider.synthesize(chunk);
-        buffers.push(r.audio);
-        segDuration += r.duration;
-        segChars += r.chars;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return NextResponse.json(
-          {
-            error: `TTS failed on segment ${i + 1} (pages ${g.page_start}–${g.page_end}): ${msg}`,
-            partial_segments: segments,
-          },
-          { status: 502 },
-        );
-      }
-    }
-
-    // Concatenate MP3 buffers by simple byte concat. MP3 frames are
-    // self-delimiting so this produces a playable file. Not ideal but works.
-    const combined = Buffer.concat(buffers);
-
-    // Upload to Cloudinary as a video (audio is served via the video resource
-    // type — Cloudinary's "raw" type doesn't handle audio MIME well).
-    let uploaded;
-    try {
-      uploaded = await new Promise<{ secure_url: string; duration?: number }>(
-        (resolve, reject) => {
-          const stream = cloudinary.uploader.upload_stream(
-            {
-              folder: `my-library/books/${bookId}/voice`,
-              public_id: `${bookId}-voice-${i + 1}-${Date.now()}`,
-              resource_type: "video",
-              format: "mp3",
-              overwrite: false,
-            },
-            (err, result) => {
-              if (err || !result) {
-                reject(err ?? new Error("Cloudinary returned no result"));
-              } else {
-                resolve({
-                  secure_url: result.secure_url,
-                  duration: result.duration,
-                });
-              }
-            },
-          );
-          stream.end(combined);
-        },
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json(
-        {
-          error: `Cloudinary upload failed on segment ${i + 1}: ${msg}`,
-          partial_segments: segments,
-        },
-        { status: 502 },
-      );
-    }
-
-    // Prefer Cloudinary's reported duration (accurate) over our estimate.
-    const realDuration = uploaded.duration ?? segDuration;
-    segments.push({
-      index: i + 1,
-      url: uploaded.secure_url,
-      page_start: g.page_start,
-      page_end: g.page_end,
-      duration: realDuration,
-      chars: segChars,
+  // Already done?
+  if (nextIndex >= total) {
+    return NextResponse.json({
+      ok: true,
+      done: true,
+      processed: existing.length,
+      total,
+      message: "All segments already generated.",
     });
-    totalChars += segChars;
-    totalSeconds += realDuration;
   }
 
-  // Persist on the book doc
-  await bookRef.update({
-    voice_segments: segments,
+  const group = groups[nextIndex];
+  const rawText = group.pages
+    .map((p) => p.text)
+    .join("\n\n")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!rawText) {
+    // Empty segment (e.g., all blank pages) — record a placeholder and move on
+    const placeholder: VoiceSegment = {
+      index: nextIndex + 1,
+      url: "",
+      page_start: group.page_start,
+      page_end: group.page_end,
+      duration: 0,
+      chars: 0,
+    };
+    await bookRef.update({
+      voice_segments: FieldValue.arrayUnion(placeholder),
+      voice_provider: providerId,
+      updated_at: FieldValue.serverTimestamp(),
+    });
+    return NextResponse.json({
+      ok: true,
+      done: nextIndex + 1 >= total,
+      processed: nextIndex + 1,
+      total,
+      skipped_empty: true,
+    });
+  }
+
+  // Synthesize. If text exceeds provider limit, split + concat MP3 bytes.
+  configureCloudinary();
+  const chunks = chunkText(rawText, provider.maxCharsPerCall);
+  const buffers: Buffer[] = [];
+  let segDuration = 0;
+  let segChars = 0;
+  try {
+    for (const chunk of chunks) {
+      const r = await provider.synthesize(chunk);
+      buffers.push(r.audio);
+      segDuration += r.duration;
+      segChars += r.chars;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      {
+        error: `TTS failed on segment ${nextIndex + 1} (pages ${group.page_start}–${group.page_end}): ${msg}`,
+        processed: existing.length,
+        total,
+      },
+      { status: 502 },
+    );
+  }
+
+  const combined = Buffer.concat(buffers);
+
+  // Upload as Cloudinary "video" resource — that's how Cloudinary serves
+  // audio with proper MIME and duration metadata.
+  let uploaded;
+  try {
+    uploaded = await new Promise<{ secure_url: string; duration?: number }>(
+      (resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: `my-library/books/${bookId}/voice`,
+            public_id: `${bookId}-voice-${nextIndex + 1}-${Date.now()}`,
+            resource_type: "video",
+            format: "mp3",
+            overwrite: false,
+          },
+          (err, result) => {
+            if (err || !result)
+              reject(err ?? new Error("Cloudinary returned no result"));
+            else
+              resolve({
+                secure_url: result.secure_url,
+                duration: result.duration,
+              });
+          },
+        );
+        stream.end(combined);
+      },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json(
+      {
+        error: `Cloudinary upload failed on segment ${nextIndex + 1}: ${msg}`,
+        processed: existing.length,
+        total,
+      },
+      { status: 502 },
+    );
+  }
+
+  const realDuration = uploaded.duration ?? segDuration;
+  const segment: VoiceSegment = {
+    index: nextIndex + 1,
+    url: uploaded.secure_url,
+    page_start: group.page_start,
+    page_end: group.page_end,
+    duration: realDuration,
+    chars: segChars,
+  };
+
+  const newProcessedCount = nextIndex + 1;
+  const isDone = newProcessedCount >= total;
+
+  // Append to voice_segments. We also recompute the total seconds on each
+  // append so the book doc has a usable summary even mid-generation.
+  const newTotalSeconds = existing.reduce((s, x) => s + x.duration, 0) + realDuration;
+
+  const update: Record<string, unknown> = {
+    voice_segments: FieldValue.arrayUnion(segment),
     voice_provider: providerId,
-    voice_total_seconds: totalSeconds,
+    voice_total_seconds: newTotalSeconds,
     updated_at: FieldValue.serverTimestamp(),
-  });
+  };
+  // On reset, replace the array instead of appending
+  if (body.reset && existing.length === 0) {
+    update.voice_segments = [segment];
+  }
+  await bookRef.update(update);
 
   return NextResponse.json({
     ok: true,
-    segments: segments.length,
-    characters: totalChars,
-    total_minutes: Math.round(totalSeconds / 60),
+    done: isDone,
+    processed: newProcessedCount,
+    total,
+    segment,
     provider: providerId,
   });
 }

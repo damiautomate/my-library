@@ -64,6 +64,12 @@ function ReadContent() {
   const [book, setBook] = useState<Book | null | undefined>(undefined);
   const [progress, setProgress] = useState<ReadingProgressDoc | null>(null);
   const [livePct, setLivePct] = useState<number | null>(null);
+  // Live page state shared across PDF / EPUB / Voice readers. When any reader
+  // updates its page (user advances, voice plays through), this updates, and
+  // the OTHER readers pick up the new initialPage when the user switches to
+  // them. Keeps progress in sync across formats without re-fetching from
+  // Firestore on every tab switch.
+  const [livePage, setLivePage] = useState<number | null>(null);
   const [proxyUrls, setProxyUrls] = useState<Partial<Record<Mode, string>>>({});
 
   // Resolve same-origin proxy URLs for each available format. Recomputed any
@@ -94,6 +100,7 @@ function ReadContent() {
     getProgress(firebaseUser.uid, bookId).then((p) => {
       setProgress(p);
       setLivePct(p?.current_percent ?? null);
+      setLivePage(p?.current_page ?? null);
     });
   }, [firebaseUser, bookId]);
 
@@ -167,13 +174,17 @@ function ReadContent() {
       )}
 
       <div className="mt-4">
+        {/* PDF and EPUB readers: mounted only when active (they're heavy and
+            don't need to persist state across tab switches — initial page
+            from livePage handles continuity). */}
         {mode === "pdf" && proxyUrls.pdf && (
           <PDFReader
             url={proxyUrls.pdf}
             userId={firebaseUser.uid}
             bookId={book.id}
-            initialPage={progress?.current_page}
+            initialPage={livePage ?? progress?.current_page}
             onPercentChange={setLivePct}
+            onPageChange={setLivePage}
           />
         )}
         {mode === "epub" && proxyUrls.epub && (
@@ -185,16 +196,27 @@ function ReadContent() {
             onPercentChange={setLivePct}
           />
         )}
-        {mode === "voice" && book.voice_segments && (
-          <VoiceReader
-            segments={book.voice_segments}
-            userId={firebaseUser.uid}
-            bookId={book.id}
-            initialPage={progress?.current_page}
-            totalPages={book.page_count ?? undefined}
-            onPercentChange={setLivePct}
-          />
+
+        {/* Voice reader: ALWAYS mounted when voice is available, just hidden
+            with CSS when the user is on a different tab. This is the only way
+            to keep audio playing across tab switches — unmounting destroys
+            the <audio> element and stops playback. The user can continue
+            listening while reading the PDF or EPUB in parallel. */}
+        {book.voice_segments && book.voice_segments.length > 0 && (
+          <div style={{ display: mode === "voice" ? "block" : "none" }}>
+            <VoiceReader
+              segments={book.voice_segments}
+              userId={firebaseUser.uid}
+              bookId={book.id}
+              initialPage={livePage ?? progress?.current_page}
+              externalPage={mode === "voice" ? undefined : livePage}
+              totalPages={book.page_count ?? undefined}
+              onPercentChange={setLivePct}
+              onPageChange={setLivePage}
+            />
+          </div>
         )}
+
         {mode === "audio" && proxyUrls.audio && (
           <AudioPlayer
             url={proxyUrls.audio}
