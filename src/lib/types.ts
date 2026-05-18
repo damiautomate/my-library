@@ -88,6 +88,10 @@ export interface BookDoc {
   epub_public_id?: string;
   /** True if this EPUB was machine-converted from the PDF (vs uploaded directly). */
   epub_converted_from_pdf?: boolean;
+  /** Map of EPUB chapter -> PDF source page. Lets the EPUB reader navigate to
+   * the matching chapter when an external reader (Voice/PDF) is at a given
+   * page. Only populated for EPUBs converted from PDF. */
+  epub_chapter_map?: EpubChapterMapping[];
   audio_summary_url?: string;
   audio_summary_public_id?: string;
   audio_summary_duration_seconds?: number;
@@ -111,6 +115,19 @@ export interface BookDoc {
 
 /** Book with its Firestore document ID attached. */
 export type Book = BookDoc & { id: string };
+
+/**
+ * Mapping of EPUB chapters to PDF source pages — generated during PDF→EPUB
+ * conversion. Lets us answer "what EPUB chapter contains PDF page N?" for
+ * inter-reader navigation.
+ */
+export interface EpubChapterMapping {
+  index: number;
+  source_page_start: number;
+  /** EPUB internal href like "chapter5.xhtml" — what epub.js navigates to. */
+  href: string;
+  title: string;
+}
 
 /**
  * One chunk of TTS-generated narration. Books generate N of these — typically

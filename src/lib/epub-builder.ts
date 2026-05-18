@@ -24,9 +24,16 @@ import JSZip from "jszip";
 
 export interface EpubChapter {
   title: string;
-  /** Plain text or pre-built HTML for the chapter body. */
-  content: string;
-  /** Optional: where this chapter starts in the source (used for sync). */
+  /** Plain text or pre-built HTML for the chapter body. Used when source_pages
+   * isn't provided. Backward-compatible with the original API. */
+  content?: string;
+  /** Preferred for PDF-converted EPUBs: per-page text blocks. When provided,
+   * each paragraph gets a data-source-page="N" attribute that lets external
+   * readers (the VoiceReader) tell the EPUB which paragraphs to highlight as
+   * the audio plays. */
+  source_pages?: Array<{ page: number; text: string }>;
+  /** Optional: where this chapter starts in the source PDF (used for chapter
+   * mapping, displayed in the EPUB internal nav). */
   source_page?: number;
 }
 
@@ -65,7 +72,7 @@ function xmlEscape(s: string): string {
  * each paragraph, and merges short adjacent lines that were probably wrapped
  * mid-sentence in the PDF.
  */
-function textToParagraphs(raw: string): string {
+function textToParagraphs(raw: string, sourcePage?: number): string {
   if (!raw.trim()) return "<p>&#160;</p>";
 
   // Normalise whitespace then split on blank lines
@@ -75,7 +82,34 @@ function textToParagraphs(raw: string): string {
     .map((b) => b.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  return blocks.map((p) => `    <p>${xmlEscape(p)}</p>`).join("\n");
+  const attr = sourcePage !== undefined ? ` data-source-page="${sourcePage}"` : "";
+  return blocks.map((p) => `    <p${attr}>${xmlEscape(p)}</p>`).join("\n");
+}
+
+/**
+ * Build paragraph HTML from per-page source. Each paragraph carries a
+ * data-source-page attribute so the voice reader can broadcast "page 42 is
+ * currently being narrated" and the EPUB iframe can find + highlight matching
+ * paragraphs in real time.
+ */
+function pagesToParagraphs(
+  sections: Array<{ page: number; text: string }>,
+): string {
+  const out: string[] = [];
+  for (const sec of sections) {
+    if (!sec.text.trim()) continue;
+    const blocks = sec.text
+      .replace(/\r\n?/g, "\n")
+      .split(/\n\s*\n+/)
+      .map((b) => b.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    for (const block of blocks) {
+      out.push(
+        `    <p data-source-page="${sec.page}">${xmlEscape(block)}</p>`,
+      );
+    }
+  }
+  return out.length > 0 ? out.join("\n") : "<p>&#160;</p>";
 }
 
 function chapterXhtml(title: string, body: string): string {
@@ -217,7 +251,18 @@ export async function buildEpub(
   zip.file("OEBPS/toc.xhtml", navXhtml(meta, chapters));
 
   chapters.forEach((c, i) => {
-    const body = c.content.startsWith("<") ? c.content : textToParagraphs(c.content);
+    let body: string;
+    if (c.source_pages && c.source_pages.length > 0) {
+      // PDF-converted chapter — emit paragraphs with data-source-page attrs
+      body = pagesToParagraphs(c.source_pages);
+    } else if (c.content) {
+      // Pre-built content (HTML) or plain text
+      body = c.content.startsWith("<")
+        ? c.content
+        : textToParagraphs(c.content, c.source_page);
+    } else {
+      body = "<p>&#160;</p>";
+    }
     zip.file(`OEBPS/chapter${i + 1}.xhtml`, chapterXhtml(c.title, body));
   });
 

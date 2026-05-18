@@ -6,12 +6,23 @@ import type { Rendition, Book as EpubBook } from "epubjs";
 import { Highlighter, Type, ChevronLeft, ChevronRight } from "lucide-react";
 import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
 
+import type { EpubChapterMapping } from "@/lib/types";
+
 interface EPUBReaderProps {
   url: string;
   userId: string;
   bookId: string;
   /** Initial EPUB CFI to restore. */
   initialCfi?: string;
+  /** Map of EPUB chapters to PDF source pages, from the convert pipeline. */
+  chapterMap?: EpubChapterMapping[];
+  /** Page set externally (PDF/Voice readers). When this changes AND this
+   * reader isn't currently focused, navigate to the matching chapter. */
+  externalPage?: number | null;
+  /** Page currently being narrated by voice. While voice is playing on
+   * another tab and the user has this EPUB tab open, paragraphs matching this
+   * source page get highlighted to follow along. */
+  currentReadingPage?: number | null;
   onPercentChange?: (pct: number) => void;
 }
 
@@ -20,6 +31,9 @@ export function EPUBReader({
   userId,
   bookId,
   initialCfi,
+  chapterMap,
+  externalPage,
+  currentReadingPage,
   onPercentChange,
 }: EPUBReaderProps) {
   const [location, setLocation] = useState<string | number>(initialCfi ?? 0);
@@ -103,6 +117,67 @@ export function EPUBReader({
     };
   }, [saver]);
 
+  // External-page → chapter navigation. When the user is on another tab (PDF
+  // or Voice) and advances pages there, externalPage changes. If chapterMap
+  // tells us which chapter contains that PDF page, navigate there. We only do
+  // this on changes — not on initial mount — to avoid overriding initialCfi.
+  const lastNavigatedPage = useRef<number | null>(null);
+  // Track current highlight target in a ref so the "rendered" event handler
+  // (set up once at mount) can read the latest value without re-binding.
+  const currentHighlightPageRef = useRef<number | null>(null);
+  useEffect(() => {
+    currentHighlightPageRef.current = currentReadingPage ?? null;
+  }, [currentReadingPage]);
+  useEffect(() => {
+    if (externalPage == null) return;
+    if (!chapterMap || chapterMap.length === 0) return;
+    if (!renditionRef.current) return;
+    if (lastNavigatedPage.current === externalPage) return;
+
+    // Find the chapter with the greatest source_page_start <= externalPage
+    let target: EpubChapterMapping | null = null;
+    for (const c of chapterMap) {
+      if (c.source_page_start <= externalPage) target = c;
+      else break;
+    }
+    if (target) {
+      lastNavigatedPage.current = externalPage;
+      try {
+        renditionRef.current.display(target.href);
+      } catch (err) {
+        console.warn("[epub] chapter navigation failed", err);
+      }
+    }
+  }, [externalPage, chapterMap]);
+
+  // Apply paragraph-level highlighting when currentReadingPage changes. We
+  // walk the rendered iframe content and toggle .voice-highlight on every
+  // <p data-source-page="N"> matching the page being narrated. The CSS for
+  // .voice-highlight is registered in the theme above.
+  useEffect(() => {
+    if (currentReadingPage == null) return;
+    if (!renditionRef.current) return;
+    try {
+      const contents = renditionRef.current.getContents() as unknown as Array<{
+        document: Document;
+      }>;
+      for (const c of contents) {
+        if (!c || !c.document) continue;
+        // Clear previous
+        c.document
+          .querySelectorAll(".voice-highlight")
+          .forEach((el) => el.classList.remove("voice-highlight"));
+        // Apply new
+        c.document
+          .querySelectorAll(`[data-source-page="${currentReadingPage}"]`)
+          .forEach((el) => el.classList.add("voice-highlight"));
+      }
+    } catch (err) {
+      // Iframe might not be ready yet — safe to ignore
+      console.warn("[epub] highlight update failed", err);
+    }
+  }, [currentReadingPage]);
+
   const getRendition: IReactReaderProps["getRendition"] = (rendition) => {
     renditionRef.current = rendition;
     const book = rendition.book;
@@ -135,6 +210,16 @@ export function EPUBReader({
         margin: "1em 0",
         "font-style": "italic",
       },
+      // The .voice-highlight class is toggled on/off via DOM manipulation
+      // each time the currently-narrated page changes. CSS lives here so it
+      // gets applied to the iframe content automatically by epub.js.
+      ".voice-highlight": {
+        "background-color": "rgba(201, 169, 97, 0.28) !important",
+        "border-left": "3px solid #C9A961 !important",
+        "padding": "0.2em 0.4em !important",
+        "margin-left": "-0.6em !important",
+        "transition": "background-color 0.3s ease !important",
+      },
     });
     rendition.themes.select("library");
     rendition.themes.fontSize(`${fontSize}%`);
@@ -153,7 +238,8 @@ export function EPUBReader({
       }
     });
 
-    // Track current chapter from the spine
+    // Track current chapter from the spine, AND re-apply voice highlight
+    // since each render swaps out the iframe contents (clearing prior classes)
     rendition.on("rendered", (section: { href?: string }) => {
       try {
         const nav = book.navigation;
@@ -162,6 +248,26 @@ export function EPUBReader({
           if (item?.label) setChapterTitle(item.label.trim());
         }
       } catch {}
+      // Re-apply highlight after a small delay to let the iframe finish loading
+      if (currentHighlightPageRef.current != null) {
+        const page = currentHighlightPageRef.current;
+        setTimeout(() => {
+          try {
+            const contents = rendition.getContents() as unknown as Array<{
+              document: Document;
+            }>;
+            for (const c of contents) {
+              if (!c || !c.document) continue;
+              c.document
+                .querySelectorAll(".voice-highlight")
+                .forEach((el) => el.classList.remove("voice-highlight"));
+              c.document
+                .querySelectorAll(`[data-source-page="${page}"]`)
+                .forEach((el) => el.classList.add("voice-highlight"));
+            }
+          } catch {}
+        }, 100);
+      }
     });
 
     // Generate per-character locations so we can compute percent.

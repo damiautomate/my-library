@@ -25,8 +25,14 @@ interface VoiceReaderProps {
    * the active tab — that would interrupt listening. */
   externalPage?: number | null;
   onPercentChange?: (pct: number) => void;
-  /** Called as voice narration advances through pages. */
+  /** Called as voice narration advances through pages. Also fires when the
+   * user manually skips/scrubs. Used for cross-tab progress sync. */
   onPageChange?: (page: number) => void;
+  /** Like onPageChange but ONLY fires when audio is actively playing — gives
+   * the EPUB reader a current-narration target for paragraph highlighting,
+   * and clears (passes null) when playback pauses/ends so the highlight is
+   * removed. */
+  onNarratingPage?: (page: number | null) => void;
 }
 
 function fmt(sec: number): string {
@@ -61,6 +67,7 @@ export function VoiceReader({
   externalPage,
   onPercentChange,
   onPageChange,
+  onNarratingPage,
 }: VoiceReaderProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [segIdx, setSegIdx] = useState(() => segmentForPage(segments, initialPage));
@@ -121,6 +128,17 @@ export function VoiceReader({
       current_percent: pct,
     });
   }, [currentPage, totalElapsed, totalDuration, totalPages, onPercentChange, onPageChange, saver, current]);
+
+  // Tell external readers (EPUB) when audio is actively playing AND what page
+  // is being narrated. Clearing on pause removes any "follow along" highlight
+  // they might be showing.
+  useEffect(() => {
+    if (playing && current) {
+      onNarratingPage?.(currentPage);
+    } else {
+      onNarratingPage?.(null);
+    }
+  }, [playing, currentPage, current, onNarratingPage]);
 
   // React to external page updates: when the user advances pages in the PDF
   // or EPUB tab, externalPage updates. We realign to the matching audio

@@ -50,32 +50,30 @@ function configureCloudinary() {
  * top-level entry's start page.
  *
  * If there's no outline, we fall back to chunking — one chapter per 20 pages.
- * Not glamorous but produces a navigable EPUB the reader can flip through.
+ *
+ * Each chapter carries its source_pages array (not joined text) so the EPUB
+ * builder can emit paragraphs with data-source-page attributes for voice-sync
+ * highlighting downstream.
  */
 function buildChapters(
   pages: PdfPage[],
   outline: PdfOutlineEntry[],
 ): EpubChapter[] {
-  const pageText = (start: number, endExclusive: number): string => {
-    return pages
-      .filter((p) => p.page >= start && p.page < endExclusive)
-      .map((p) => p.text)
-      .join("\n\n");
-  };
+  const pagesInRange = (start: number, endExclusive: number): PdfPage[] =>
+    pages.filter((p) => p.page >= start && p.page < endExclusive);
 
-  // Flatten the outline to top-level entries with valid pages
   const top = outline.filter((o) => o.page >= 1);
 
   if (top.length >= 2) {
     const chapters: EpubChapter[] = [];
 
-    // If the first chapter starts after page 1, capture the front matter
     if (top[0].page > 1) {
-      const frontText = pageText(1, top[0].page);
-      if (frontText.trim().length > 200) {
+      const front = pagesInRange(1, top[0].page);
+      const totalLen = front.reduce((s, p) => s + p.text.length, 0);
+      if (totalLen > 200) {
         chapters.push({
           title: "Front Matter",
-          content: frontText,
+          source_pages: front,
           source_page: 1,
         });
       }
@@ -84,11 +82,11 @@ function buildChapters(
     for (let i = 0; i < top.length; i++) {
       const start = top[i].page;
       const end = i < top.length - 1 ? top[i + 1].page : pages.length + 1;
-      const text = pageText(start, end);
-      if (text.trim().length > 0) {
+      const slice = pagesInRange(start, end);
+      if (slice.some((p) => p.text.trim())) {
         chapters.push({
           title: top[i].title,
-          content: text,
+          source_pages: slice,
           source_page: start,
         });
       }
@@ -96,16 +94,16 @@ function buildChapters(
     return chapters;
   }
 
-  // No usable outline — chunk by every N pages
+  // No outline — chunk into 20-page sections
   const chunkSize = 20;
   const chapters: EpubChapter[] = [];
   for (let start = 1; start <= pages.length; start += chunkSize) {
     const end = Math.min(start + chunkSize, pages.length + 1);
-    const text = pageText(start, end);
-    if (text.trim().length === 0) continue;
+    const slice = pagesInRange(start, end);
+    if (!slice.some((p) => p.text.trim())) continue;
     chapters.push({
       title: `Pages ${start}–${end - 1}`,
-      content: text,
+      source_pages: slice,
       source_page: start,
     });
   }
@@ -228,11 +226,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
+  // Build a chapter -> source page map so the EPUB reader can sync to PDF
+  // page numbers later (when the voice reader is at page 47 and the user
+  // switches to EPUB, we navigate to the chapter whose source_page_start <= 47).
+  const epub_chapter_map = chapters.map((c, i) => ({
+    index: i,
+    source_page_start: c.source_page ?? 0,
+    href: `chapter${i + 1}.xhtml`,
+    title: c.title,
+  }));
+
   // Update the book doc
   await bookRef.update({
     epub_url: uploaded.secure_url,
     epub_public_id: uploaded.public_id,
     epub_converted_from_pdf: true,
+    epub_chapter_map,
     updated_at: FieldValue.serverTimestamp(),
   });
 

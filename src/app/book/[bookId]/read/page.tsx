@@ -70,6 +70,11 @@ function ReadContent() {
   // them. Keeps progress in sync across formats without re-fetching from
   // Firestore on every tab switch.
   const [livePage, setLivePage] = useState<number | null>(null);
+  // The page currently being narrated by voice — separate from livePage so
+  // the user can read ahead in PDF/EPUB while voice continues at its own pace,
+  // and the EPUB still highlights the paragraph being narrated wherever the
+  // user is.
+  const [voicePage, setVoicePage] = useState<number | null>(null);
   const [proxyUrls, setProxyUrls] = useState<Partial<Record<Mode, string>>>({});
 
   // Resolve same-origin proxy URLs for each available format. Recomputed any
@@ -193,6 +198,9 @@ function ReadContent() {
             userId={firebaseUser.uid}
             bookId={book.id}
             initialCfi={progress?.current_cfi}
+            chapterMap={book.epub_chapter_map}
+            externalPage={livePage}
+            currentReadingPage={voicePage}
             onPercentChange={setLivePct}
           />
         )}
@@ -213,6 +221,7 @@ function ReadContent() {
               totalPages={book.page_count ?? undefined}
               onPercentChange={setLivePct}
               onPageChange={setLivePage}
+              onNarratingPage={setVoicePage}
             />
           </div>
         )}
