@@ -124,6 +124,28 @@ function ReadContent() {
     });
   }, [firebaseUser, bookId]);
 
+  // Stable callbacks for the voice control bridge. MUST be declared before any
+  // early returns to satisfy the Rules of Hooks — React requires the same
+  // number of hooks in the same order on every render, and the conditional
+  // returns below would skip these on initial loading renders, then run them
+  // on subsequent renders once book is loaded, causing "Rendered more hooks
+  // than during the previous render" crashes.
+  const handleVoiceControlsReady = useCallback(
+    (h: VoiceReaderHandle | null) => {
+      voiceControlsRef.current = h;
+    },
+    [],
+  );
+  const handleVoiceTogglePlay = useCallback(() => {
+    void voiceControlsRef.current?.togglePlay();
+  }, []);
+  const handleVoiceNudgeBack = useCallback(() => {
+    voiceControlsRef.current?.nudgeBackward(10);
+  }, []);
+  const handleVoiceNudgeForward = useCallback(() => {
+    voiceControlsRef.current?.nudgeForward(10);
+  }, []);
+
   if (book === undefined) {
     return (
       <main className="mx-auto max-w-5xl px-6 py-16">
@@ -163,25 +185,6 @@ function ReadContent() {
     ? requestedMode
     : available[0];
 
-  // Stable callbacks for the voice control bridge. These get passed to
-  // PDFReader as the mini-player handlers — using useCallback so the props
-  // don't change identity on every render and trigger unnecessary work.
-  const handleVoiceControlsReady = useCallback(
-    (h: VoiceReaderHandle | null) => {
-      voiceControlsRef.current = h;
-    },
-    [],
-  );
-  const handleVoiceTogglePlay = useCallback(() => {
-    void voiceControlsRef.current?.togglePlay();
-  }, []);
-  const handleVoiceNudgeBack = useCallback(() => {
-    voiceControlsRef.current?.nudgeBackward(10);
-  }, []);
-  const handleVoiceNudgeForward = useCallback(() => {
-    voiceControlsRef.current?.nudgeForward(10);
-  }, []);
-
   const hasVoice =
     book.voice_segments != null && book.voice_segments.length > 0;
 
@@ -209,6 +212,141 @@ function ReadContent() {
               {m === "voice" && <Mic size={11} />}
               {m === "epub" && <BookOpen size={11} />}
               {m === "audio" && <Headphones size={11} />}
+              {m === "audio" ? "summary" : m}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4">
+        {/* PDF and EPUB readers: mounted only when active (they're heavy and
+            don't need to persist state across tab switches — initial page
+            from livePage handles continuity). */}
+        {mode === "pdf" && proxyUrls.pdf && (
+          <PDFReader
+            url={proxyUrls.pdf}
+            userId={firebaseUser.uid}
+            bookId={book.id}
+            initialPage={livePage ?? progress?.current_page}
+            currentReadingPage={voicePage}
+            currentReadingParagraph={voiceParagraph}
+            voicePlaying={voicePlaying}
+            onVoiceTogglePlay={hasVoice ? handleVoiceTogglePlay : undefined}
+            onVoiceNudgeBackward={hasVoice ? handleVoiceNudgeBack : undefined}
+            onVoiceNudgeForward={hasVoice ? handleVoiceNudgeForward : undefined}
+            onPercentChange={setLivePct}
+            onPageChange={setLivePage}
+          />
+        )}
+        {mode === "epub" && proxyUrls.epub && (
+          <EPUBReader
+            url={proxyUrls.epub}
+            userId={firebaseUser.uid}
+            bookId={book.id}
+            initialCfi={progress?.current_cfi}
+            chapterMap={book.epub_chapter_map}
+            externalPage={livePage}
+            currentReadingPage={voicePage}
+            currentReadingParagraph={voiceParagraph}
+            onPercentChange={setLivePct}
+          />
+        )}
+
+        {/* Voice reader: ALWAYS mounted when voice is available, just hidden
+            with CSS when the user is on a different tab. This is the only way
+            to keep audio playing across tab switches — unmounting destroys
+            the <audio> element and stops playback. The user can continue
+            listening while reading the PDF or EPUB in parallel. */}
+        {book.voice_segments && book.voice_segments.length > 0 && (
+          <div style={{ display: mode === "voice" ? "block" : "none" }}>
+            <VoiceReader
+              segments={book.voice_segments}
+              userId={firebaseUser.uid}
+              bookId={book.id}
+              initialPage={livePage ?? progress?.current_page}
+              initialSegmentIndex={progress?.current_voice_segment_index}
+              initialSeconds={progress?.current_voice_seconds}
+              externalPage={mode === "voice" ? undefined : livePage}
+              totalPages={book.page_count ?? undefined}
+              onPercentChange={setLivePct}
+              onPageChange={setLivePage}
+              onNarratingPage={setVoicePage}
+              onNarratingParagraph={setVoiceParagraph}
+              onPlayingChange={setVoicePlaying}
+              onControlsReady={handleVoiceControlsReady}
+            />
+          </div>
+        )}
+
+        {mode === "audio" && proxyUrls.audio && (
+          <AudioPlayer
+            url={proxyUrls.audio}
+            userId={firebaseUser.uid}
+            bookId={book.id}
+            initialSeconds={progress?.current_audio_seconds}
+            durationHint={book.audio_summary_duration_seconds}
+            onPercentChange={setLivePct}
+          />
+        )}
+        {mode !== "voice" && !proxyUrls[mode as Exclude<Mode, "voice">] && (
+          <p className="py-10 text-center font-mono text-[0.65rem] uppercase tracking-[0.2em] text-ink-500">
+            Preparing the {mode} reader…
+          </p>
+        )}
+      </div>
+
+      {/* Mark-as-finished prompt */}
+      {livePct !== null && livePct >= 95 && progress?.status !== "finished" && (
+        <div className="mt-6 flex items-center justify-between gap-3 rounded-sm border border-forest-600/40 bg-forest-50 px-5 py-4">
+          <div>
+            <p className="font-display text-lg text-forest-600">
+              You're nearly through. Mark as finished?
+            </p>
+            <p className="mt-1 text-xs text-ink-600">
+              You'll be prompted for a rating and a closing note.
+            </p>
+          </div>
+          <Link href={`/book/${bookId}?finish=1`}>
+            <Button variant="primary">Mark finished</Button>
+          </Link>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function BackBar({
+  bookId,
+  title,
+  pct,
+}: {
+  bookId: string;
+  title: string;
+  pct?: number | null;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b ml-hairline pb-3">
+      <Link
+        href={`/book/${bookId}`}
+        className="flex items-center gap-1.5 text-sm text-ink-700 hover:text-ink-900"
+      >
+        <ArrowLeft size={14} />
+        <span className="font-display text-base">{title}</span>
+      </Link>
+      {pct !== null && pct !== undefined && (
+        <div className="flex items-center gap-2">
+          <div className="h-1 w-40 overflow-hidden rounded-full bg-parchment-200">
+            <div
+              className="h-full bg-oxblood-600"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="font-mono text-xs text-ink-700">{pct}%</span>
+        </div>
+      )}
+    </div>
+  );
+}              {m === "audio" && <Headphones size={11} />}
               {m === "audio" ? "summary" : m}
             </button>
           ))}
