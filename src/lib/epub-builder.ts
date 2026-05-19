@@ -88,9 +88,11 @@ function textToParagraphs(raw: string, sourcePage?: number): string {
 
 /**
  * Build paragraph HTML from per-page source. Each paragraph carries a
- * data-source-page attribute so the voice reader can broadcast "page 42 is
- * currently being narrated" and the EPUB iframe can find + highlight matching
- * paragraphs in real time.
+ * data-source-page attribute (which PDF page it came from) AND a
+ * data-page-paragraph-index attribute (its position within that page's
+ * paragraphs, 0-indexed). Together these let the voice reader broadcast
+ * "page 47, paragraph 2 is being narrated right now" and the EPUB iframe
+ * can highlight exactly one paragraph at a time instead of the whole page.
  */
 function pagesToParagraphs(
   sections: Array<{ page: number; text: string }>,
@@ -103,11 +105,11 @@ function pagesToParagraphs(
       .split(/\n\s*\n+/)
       .map((b) => b.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
       .filter(Boolean);
-    for (const block of blocks) {
+    blocks.forEach((block, idx) => {
       out.push(
-        `    <p data-source-page="${sec.page}">${xmlEscape(block)}</p>`,
+        `    <p data-source-page="${sec.page}" data-page-paragraph-index="${idx}">${xmlEscape(block)}</p>`,
       );
-    }
+    });
   }
   return out.length > 0 ? out.join("\n") : "<p>&#160;</p>";
 }

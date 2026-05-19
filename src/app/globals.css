@@ -157,3 +157,17 @@
     display: none !important;
   }
 }
+
+/* ----- PDF voice-narration paragraph highlight ----------------------------
+   When the voice reader is playing and broadcasts which paragraph is currently
+   being narrated, PDFReader walks the rendered text layer and adds this class
+   to matching spans. The text layer is normally transparent (spans overlay
+   the canvas-rendered text for selection); adding a background color creates
+   a translucent gold highlight over the visible text on the canvas. */
+.react-pdf__Page__textContent .voice-para-highlight {
+  background-color: rgba(201, 169, 97, 0.45) !important;
+  border-radius: 2px;
+  /* Slight outline helps the highlight register even on the lightest spans */
+  box-shadow: 0 0 0 1px rgba(156, 126, 61, 0.25);
+  transition: background-color 0.25s ease;
+}

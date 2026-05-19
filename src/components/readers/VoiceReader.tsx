@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Pause,
   Play,
@@ -12,6 +18,35 @@ import {
 } from "lucide-react";
 import { makeDebouncedSaver, saveProgress } from "@/lib/progress";
 import type { VoiceSegment } from "@/lib/types";
+
+/**
+ * Currently-narrating paragraph info. The PDF/EPUB readers use this to
+ * highlight the right paragraph in real-time as audio plays.
+ *   - page: which source-PDF page this paragraph is on (matches data-source-page)
+ *   - paragraphIndex: 0-based position within that page's paragraphs
+ *     (matches data-page-paragraph-index)
+ *   - text: a truncated snippet of the paragraph (used by PDFReader to find
+ *     matching spans in the rendered PDF text layer)
+ */
+export interface NarratingParagraph {
+  page: number;
+  paragraphIndex: number;
+  text: string;
+}
+
+/**
+ * Imperative control handle exposed to the parent via the onControlsReady
+ * callback prop. Lets sibling readers (PDFReader, EPUBReader) drive playback
+ * — e.g. a mini play/pause button in the PDF toolbar while audio plays
+ * in the background. We use a callback registry instead of forwardRef
+ * because next/dynamic doesn't propagate refs through its wrapper.
+ */
+export interface VoiceReaderHandle {
+  togglePlay: () => Promise<void>;
+  nudgeBackward: (seconds: number) => void;
+  nudgeForward: (seconds: number) => void;
+  isPlaying: () => boolean;
+}
 
 interface VoiceReaderProps {
   segments: VoiceSegment[];
@@ -42,14 +77,74 @@ interface VoiceReaderProps {
    * and clears (passes null) when playback pauses/ends so the highlight is
    * removed. */
   onNarratingPage?: (page: number | null) => void;
+  /** Fires when narration crosses paragraph boundaries (estimated by char
+   * weight against segment duration). Null when not playing or no paragraph
+   * data on the segment (older voice generations). */
+  onNarratingParagraph?: (info: NarratingParagraph | null) => void;
+  /** Fires whenever play/pause state changes — lets the parent show a
+   * "playing" indicator + enable/disable mini-player controls elsewhere. */
+  onPlayingChange?: (playing: boolean) => void;
+  /** Called once on mount with an imperative control handle, and again with
+   * null on unmount. The parent stores the handle in a ref and passes
+   * bound callbacks to sibling readers (e.g. PDF toolbar mini-player). This
+   * is a callback-based alternative to forwardRef because next/dynamic
+   * doesn't forward refs through its wrapper. */
+  onControlsReady?: (handle: VoiceReaderHandle | null) => void;
 }
 
 const NUDGE_SECONDS = 10;
 
+/**
+ * Given a segment, the audio position within it, and the per-page paragraph
+ * data, return which paragraph is most likely being narrated right now.
+ *
+ * We model the segment as a sequence of paragraphs across pages and assume
+ * narration speed is roughly proportional to character count — longer
+ * paragraphs take longer to read aloud. Each paragraph gets a time slice
+ * proportional to its char share of the segment total. Without SSML
+ * timepoints this is approximate but close enough for highlighting.
+ */
+function findCurrentParagraph(
+  segment: VoiceSegment,
+  position: number,
+): NarratingParagraph | null {
+  if (!segment.pages_paragraphs || segment.pages_paragraphs.length === 0)
+    return null;
+  const all: Array<{ page: number; index: number; text: string }> = [];
+  for (const pg of segment.pages_paragraphs) {
+    pg.paragraphs.forEach((text, idx) => {
+      if (text.trim().length > 0) {
+        all.push({ page: pg.page, index: idx, text });
+      }
+    });
+  }
+  if (all.length === 0) return null;
+  const dur = segment.duration > 0 ? segment.duration : 1;
+  const totalChars = all.reduce((s, p) => s + Math.max(1, p.text.length), 0);
+  let cumChars = 0;
+  for (const p of all) {
+    const chars = Math.max(1, p.text.length);
+    const endTime = ((cumChars + chars) / totalChars) * dur;
+    if (position < endTime) {
+      return { page: p.page, paragraphIndex: p.index, text: p.text };
+    }
+    cumChars += chars;
+  }
+  const last = all[all.length - 1];
+  return { page: last.page, paragraphIndex: last.index, text: last.text };
+}
+
 function fmt(sec: number): string {
   if (!isFinite(sec) || sec < 0) return "0:00";
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) {
+    // H:MM:SS — e.g. "2:14:23" for a long book's total duration
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+  // M:SS — e.g. "3:45" for shorter durations
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
@@ -81,6 +176,9 @@ export function VoiceReader({
   onPercentChange,
   onPageChange,
   onNarratingPage,
+  onNarratingParagraph,
+  onPlayingChange,
+  onControlsReady,
 }: VoiceReaderProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -376,6 +474,63 @@ export function VoiceReader({
     },
     [current, segIdx, segments, saver],
   );
+
+  // Stable refs to the latest fn versions — used by the imperative handle so
+  // the parent gets a stable callback identity that always calls through to
+  // the current closure. Without this, the parent would re-receive the
+  // handle on every render (every useCallback dep change) and have to
+  // re-bind props on PDFReader, causing unnecessary work.
+  const togglePlayLatestRef = useRef(togglePlay);
+  const nudgeBackwardLatestRef = useRef(nudgeBackward);
+  const nudgeForwardLatestRef = useRef(nudgeForward);
+  const playingLatestRef = useRef(playing);
+  useEffect(() => {
+    togglePlayLatestRef.current = togglePlay;
+  }, [togglePlay]);
+  useEffect(() => {
+    nudgeBackwardLatestRef.current = nudgeBackward;
+  }, [nudgeBackward]);
+  useEffect(() => {
+    nudgeForwardLatestRef.current = nudgeForward;
+  }, [nudgeForward]);
+  useEffect(() => {
+    playingLatestRef.current = playing;
+  }, [playing]);
+
+  // Hand a stable control handle to the parent ONCE per onControlsReady
+  // identity. The parent should pass a stable callback (e.g. via useCallback).
+  useEffect(() => {
+    if (!onControlsReady) return;
+    const handle: VoiceReaderHandle = {
+      togglePlay: () => togglePlayLatestRef.current(),
+      nudgeBackward: (s) => nudgeBackwardLatestRef.current(s),
+      nudgeForward: (s) => nudgeForwardLatestRef.current(s),
+      isPlaying: () => playingLatestRef.current,
+    };
+    onControlsReady(handle);
+    return () => onControlsReady(null);
+  }, [onControlsReady]);
+
+  // Broadcast playing state so the parent can show a "Voice playing" badge
+  // and enable/disable the PDF-tab mini-player accordingly.
+  useEffect(() => {
+    onPlayingChange?.(playing);
+  }, [playing, onPlayingChange]);
+
+  // Broadcast the currently-narrated paragraph (page + index + text snippet).
+  // Fires only while playing — on pause we send null so highlights clear.
+  // Computed from the segment's pages_paragraphs (populated during voice
+  // generation) weighted by char count against segment duration. If the
+  // segment was generated before pages_paragraphs existed, this is a no-op
+  // and PDF/EPUB fall back to page-level highlighting only.
+  useEffect(() => {
+    if (!playing || !current) {
+      onNarratingParagraph?.(null);
+      return;
+    }
+    const para = findCurrentParagraph(current, position);
+    onNarratingParagraph?.(para);
+  }, [playing, current, position, onNarratingParagraph]);
 
   const skipForward = useCallback(() => {
     if (segIdx < segments.length - 1) {

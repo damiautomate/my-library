@@ -19,10 +19,18 @@ interface EPUBReaderProps {
   /** Page set externally (PDF/Voice readers). When this changes AND this
    * reader isn't currently focused, navigate to the matching chapter. */
   externalPage?: number | null;
-  /** Page currently being narrated by voice. While voice is playing on
-   * another tab and the user has this EPUB tab open, paragraphs matching this
-   * source page get highlighted to follow along. */
+  /** Page currently being narrated by voice (fallback for older voice
+   * generations that don't have paragraph data). When set, ALL paragraphs
+   * on this page get a soft highlight. */
   currentReadingPage?: number | null;
+  /** Single-paragraph target currently being narrated. When set, ONLY the
+   * matching paragraph gets the highlight — much cleaner UX than the
+   * whole-page fallback. Requires the voice segment to have pages_paragraphs
+   * (generated after Phase 9e). */
+  currentReadingParagraph?: {
+    page: number;
+    paragraphIndex: number;
+  } | null;
   onPercentChange?: (pct: number) => void;
 }
 
@@ -34,6 +42,7 @@ export function EPUBReader({
   chapterMap,
   externalPage,
   currentReadingPage,
+  currentReadingParagraph,
   onPercentChange,
 }: EPUBReaderProps) {
   const [location, setLocation] = useState<string | number>(initialCfi ?? 0);
@@ -122,12 +131,19 @@ export function EPUBReader({
   // tells us which chapter contains that PDF page, navigate there. We only do
   // this on changes — not on initial mount — to avoid overriding initialCfi.
   const lastNavigatedPage = useRef<number | null>(null);
-  // Track current highlight target in a ref so the "rendered" event handler
-  // (set up once at mount) can read the latest value without re-binding.
+  // Track current highlight target in refs so the "rendered" event handler
+  // (set up once at mount) can read the latest values without re-binding.
   const currentHighlightPageRef = useRef<number | null>(null);
+  const currentHighlightParagraphRef = useRef<{
+    page: number;
+    paragraphIndex: number;
+  } | null>(null);
   useEffect(() => {
     currentHighlightPageRef.current = currentReadingPage ?? null;
   }, [currentReadingPage]);
+  useEffect(() => {
+    currentHighlightParagraphRef.current = currentReadingParagraph ?? null;
+  }, [currentReadingParagraph]);
   useEffect(() => {
     if (externalPage == null) return;
     if (!chapterMap || chapterMap.length === 0) return;
@@ -150,12 +166,11 @@ export function EPUBReader({
     }
   }, [externalPage, chapterMap]);
 
-  // Apply paragraph-level highlighting when currentReadingPage changes. We
-  // walk the rendered iframe content and toggle .voice-highlight on every
-  // <p data-source-page="N"> matching the page being narrated. The CSS for
-  // .voice-highlight is registered in the theme above.
+  // Voice-highlight target: prefer the precise paragraph (page + index) when
+  // available, otherwise fall back to highlighting all paragraphs on the
+  // narrated page. Paragraph data is only present on voice segments
+  // generated after Phase 9e; older segments still get page-level highlight.
   useEffect(() => {
-    if (currentReadingPage == null) return;
     if (!renditionRef.current) return;
     try {
       const contents = renditionRef.current.getContents() as unknown as Array<{
@@ -163,20 +178,31 @@ export function EPUBReader({
       }>;
       for (const c of contents) {
         if (!c || !c.document) continue;
-        // Clear previous
+        // Always clear previous highlights first
         c.document
           .querySelectorAll(".voice-highlight")
           .forEach((el) => el.classList.remove("voice-highlight"));
-        // Apply new
-        c.document
-          .querySelectorAll(`[data-source-page="${currentReadingPage}"]`)
-          .forEach((el) => el.classList.add("voice-highlight"));
+        // Apply new — paragraph-level if we have it
+        if (currentReadingParagraph) {
+          const selector = `[data-source-page="${currentReadingParagraph.page}"][data-page-paragraph-index="${currentReadingParagraph.paragraphIndex}"]`;
+          const matches = c.document.querySelectorAll(selector);
+          if (matches.length > 0) {
+            matches.forEach((el) => el.classList.add("voice-highlight"));
+            continue;
+          }
+          // Paragraph not found in this chapter — try the looser page-level match
+        }
+        if (currentReadingPage != null) {
+          c.document
+            .querySelectorAll(`[data-source-page="${currentReadingPage}"]`)
+            .forEach((el) => el.classList.add("voice-highlight"));
+        }
       }
     } catch (err) {
       // Iframe might not be ready yet — safe to ignore
       console.warn("[epub] highlight update failed", err);
     }
-  }, [currentReadingPage]);
+  }, [currentReadingPage, currentReadingParagraph]);
 
   const getRendition: IReactReaderProps["getRendition"] = (rendition) => {
     renditionRef.current = rendition;
@@ -249,8 +275,9 @@ export function EPUBReader({
         }
       } catch {}
       // Re-apply highlight after a small delay to let the iframe finish loading
-      if (currentHighlightPageRef.current != null) {
-        const page = currentHighlightPageRef.current;
+      const paragraphTarget = currentHighlightParagraphRef.current;
+      const pageTarget = currentHighlightPageRef.current;
+      if (paragraphTarget || pageTarget != null) {
         setTimeout(() => {
           try {
             const contents = rendition.getContents() as unknown as Array<{
@@ -261,9 +288,19 @@ export function EPUBReader({
               c.document
                 .querySelectorAll(".voice-highlight")
                 .forEach((el) => el.classList.remove("voice-highlight"));
-              c.document
-                .querySelectorAll(`[data-source-page="${page}"]`)
-                .forEach((el) => el.classList.add("voice-highlight"));
+              if (paragraphTarget) {
+                const sel = `[data-source-page="${paragraphTarget.page}"][data-page-paragraph-index="${paragraphTarget.paragraphIndex}"]`;
+                const matches = c.document.querySelectorAll(sel);
+                if (matches.length > 0) {
+                  matches.forEach((el) => el.classList.add("voice-highlight"));
+                  continue;
+                }
+              }
+              if (pageTarget != null) {
+                c.document
+                  .querySelectorAll(`[data-source-page="${pageTarget}"]`)
+                  .forEach((el) => el.classList.add("voice-highlight"));
+              }
             }
           } catch {}
         }, 100);

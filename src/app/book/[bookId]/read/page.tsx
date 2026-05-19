@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams, notFound } from "next/navigation";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -12,6 +12,10 @@ import { getBook } from "@/lib/books";
 import { proxyFileUrl } from "@/lib/cloudinary";
 import { getProgress } from "@/lib/progress";
 import type { Book, ReadingProgressDoc } from "@/lib/types";
+import type {
+  NarratingParagraph,
+  VoiceReaderHandle,
+} from "@/components/readers/VoiceReader";
 
 // react-pdf and react-reader touch window/Worker APIs; ensure they only load
 // in the browser by dynamically importing with ssr: false.
@@ -75,6 +79,17 @@ function ReadContent() {
   // and the EPUB still highlights the paragraph being narrated wherever the
   // user is.
   const [voicePage, setVoicePage] = useState<number | null>(null);
+  // The specific paragraph currently being narrated. Lets PDF/EPUB highlight
+  // ONE paragraph at a time instead of a whole page. Cleared on pause.
+  const [voiceParagraph, setVoiceParagraph] =
+    useState<NarratingParagraph | null>(null);
+  // Whether audio is actively playing — drives PDF mini-player icon state.
+  const [voicePlaying, setVoicePlaying] = useState(false);
+  // Imperative control handle to drive the VoiceReader's audio from elsewhere
+  // (e.g. PDF toolbar mini-player). Populated by VoiceReader on mount via the
+  // onControlsReady callback. We use a ref instead of state so toggling the
+  // handle doesn't trigger re-renders.
+  const voiceControlsRef = useRef<VoiceReaderHandle | null>(null);
   const [proxyUrls, setProxyUrls] = useState<Partial<Record<Mode, string>>>({});
 
   // Resolve same-origin proxy URLs for each available format. Recomputed any
@@ -148,6 +163,28 @@ function ReadContent() {
     ? requestedMode
     : available[0];
 
+  // Stable callbacks for the voice control bridge. These get passed to
+  // PDFReader as the mini-player handlers — using useCallback so the props
+  // don't change identity on every render and trigger unnecessary work.
+  const handleVoiceControlsReady = useCallback(
+    (h: VoiceReaderHandle | null) => {
+      voiceControlsRef.current = h;
+    },
+    [],
+  );
+  const handleVoiceTogglePlay = useCallback(() => {
+    void voiceControlsRef.current?.togglePlay();
+  }, []);
+  const handleVoiceNudgeBack = useCallback(() => {
+    voiceControlsRef.current?.nudgeBackward(10);
+  }, []);
+  const handleVoiceNudgeForward = useCallback(() => {
+    voiceControlsRef.current?.nudgeForward(10);
+  }, []);
+
+  const hasVoice =
+    book.voice_segments != null && book.voice_segments.length > 0;
+
   return (
     <main className="mx-auto max-w-6xl px-6 pb-16 pt-6">
       <BackBar bookId={bookId!} title={book.title} pct={livePct} />
@@ -189,6 +226,11 @@ function ReadContent() {
             bookId={book.id}
             initialPage={livePage ?? progress?.current_page}
             currentReadingPage={voicePage}
+            currentReadingParagraph={voiceParagraph}
+            voicePlaying={voicePlaying}
+            onVoiceTogglePlay={hasVoice ? handleVoiceTogglePlay : undefined}
+            onVoiceNudgeBackward={hasVoice ? handleVoiceNudgeBack : undefined}
+            onVoiceNudgeForward={hasVoice ? handleVoiceNudgeForward : undefined}
             onPercentChange={setLivePct}
             onPageChange={setLivePage}
           />
@@ -202,6 +244,7 @@ function ReadContent() {
             chapterMap={book.epub_chapter_map}
             externalPage={livePage}
             currentReadingPage={voicePage}
+            currentReadingParagraph={voiceParagraph}
             onPercentChange={setLivePct}
           />
         )}
@@ -225,6 +268,9 @@ function ReadContent() {
               onPercentChange={setLivePct}
               onPageChange={setLivePage}
               onNarratingPage={setVoicePage}
+              onNarratingParagraph={setVoiceParagraph}
+              onPlayingChange={setVoicePlaying}
+              onControlsReady={handleVoiceControlsReady}
             />
           </div>
         )}

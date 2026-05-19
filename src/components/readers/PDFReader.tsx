@@ -16,12 +16,16 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronRight as ChevronRightSmall,
+  FastForward,
   Headphones,
   Highlighter,
   List,
   Loader2,
   Maximize,
   Minimize,
+  Pause,
+  Play,
+  Rewind,
   X as XIcon,
   ZoomIn,
   ZoomOut,
@@ -46,6 +50,24 @@ interface PDFReaderProps {
    * advances. A small "Following voice" chip in the toolbar makes this
    * obvious. Pass null to disable following. */
   currentReadingPage?: number | null;
+  /** The specific paragraph being narrated right now (page + index + a text
+   * snippet for matching). When set, the PDF text layer is searched for the
+   * paragraph text and matching spans get the .voice-para-highlight class
+   * applied. Requires voice segments generated after Phase 9e. */
+  currentReadingParagraph?: {
+    page: number;
+    paragraphIndex: number;
+    text: string;
+  } | null;
+  /** Whether the voice reader is currently playing — drives the mini-player
+   * play/pause icon in the PDF toolbar. */
+  voicePlaying?: boolean;
+  /** Imperative control callbacks bound to the live VoiceReader. When all
+   * three are provided, a compact 4-button audio mini-player appears in the
+   * PDF toolbar so the user can pause / nudge ±10s without switching tabs. */
+  onVoiceTogglePlay?: () => void;
+  onVoiceNudgeBackward?: () => void;
+  onVoiceNudgeForward?: () => void;
 }
 
 /** Flattened TOC node — what we render in the sidebar. */
@@ -76,6 +98,11 @@ export function PDFReader({
   onPercentChange,
   onPageChange,
   currentReadingPage,
+  currentReadingParagraph,
+  voicePlaying,
+  onVoiceTogglePlay,
+  onVoiceNudgeBackward,
+  onVoiceNudgeForward,
 }: PDFReaderProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState<number>(initialPage ?? 1);
@@ -226,6 +253,93 @@ export function PDFReader({
     setPage(clamped);
     persistProgress(clamped);
   }, [currentReadingPage, page, numPages, persistProgress]);
+
+  // Paragraph-level highlighting in the PDF text layer. When the voice reader
+  // broadcasts which paragraph is being narrated (page + a text snippet), we
+  // walk the rendered text-layer spans, concatenate their content into one
+  // string, find the first ~60 chars of the target paragraph as a substring,
+  // and apply .voice-para-highlight to the spans that cover that range.
+  //
+  // The text layer is rendered transparently over the PDF canvas — adding a
+  // background color to those spans creates a colored rectangle over the
+  // text on the canvas. CSS for the class is injected globally so it works
+  // across all rendered pages.
+  const lastHighlightedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!currentReadingParagraph || currentReadingParagraph.page !== page) {
+      // Wrong page or no target — clear any existing highlight
+      document
+        .querySelectorAll(".voice-para-highlight")
+        .forEach((el) => el.classList.remove("voice-para-highlight"));
+      lastHighlightedKeyRef.current = null;
+      return;
+    }
+    const key = `${currentReadingParagraph.page}-${currentReadingParagraph.paragraphIndex}`;
+    if (lastHighlightedKeyRef.current === key) return;
+
+    const apply = () => {
+      const textLayer = document.querySelector(
+        ".react-pdf__Page__textContent",
+      );
+      if (!textLayer) return false;
+      // Clear previous
+      textLayer
+        .querySelectorAll(".voice-para-highlight")
+        .forEach((el) => el.classList.remove("voice-para-highlight"));
+
+      const spans = Array.from(
+        textLayer.querySelectorAll("span"),
+      ) as HTMLElement[];
+      if (spans.length === 0) return false;
+
+      // Build concatenated text + per-span offset ranges
+      let concat = "";
+      const ranges: Array<{ start: number; end: number; el: HTMLElement }> = [];
+      for (const span of spans) {
+        const start = concat.length;
+        const txt = span.textContent ?? "";
+        concat += txt;
+        ranges.push({ start, end: concat.length, el: span });
+        // Add a space between spans so word boundaries match the source text,
+        // unless the span already ends in whitespace
+        if (txt && !/\s$/.test(txt)) concat += " ";
+      }
+
+      // Normalize the target paragraph and the concatenated text the same way
+      // (collapse whitespace) so the substring match is robust against
+      // line-break differences between pdfjs's extraction and ours.
+      const normTarget = currentReadingParagraph.text
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 60);
+      if (normTarget.length < 8) return false;
+
+      // We need to find the target in the (non-normalized) concat to keep
+      // span offsets correct. So do a loose case-insensitive search.
+      const idx = concat.toLowerCase().indexOf(normTarget.toLowerCase());
+      if (idx === -1) return false;
+      const endIdx = idx + normTarget.length;
+
+      for (const r of ranges) {
+        if (r.end > idx && r.start < endIdx) {
+          r.el.classList.add("voice-para-highlight");
+        }
+      }
+      return true;
+    };
+
+    // Try immediately, then with a small delay in case the text layer is
+    // still rendering (page transitions take ~50-150ms).
+    const ok = apply();
+    if (ok) {
+      lastHighlightedKeyRef.current = key;
+    } else {
+      const timer = setTimeout(() => {
+        if (apply()) lastHighlightedKeyRef.current = key;
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [currentReadingParagraph, page]);
 
   // ----- Keyboard nav -----------------------------------------------------
   useEffect(() => {
@@ -444,6 +558,52 @@ export function PDFReader({
               <Headphones size={11} />
               Following voice · pg {currentReadingPage}
             </span>
+          )}
+          {/* Audio mini-player — visible whenever the parent has wired up voice
+              controls (i.e. the book has voice_segments). Lets you pause /
+              nudge ±10s without leaving the PDF tab. */}
+          {onVoiceTogglePlay && (
+            <div
+              className="ml-2 flex items-center gap-0.5 rounded-full border border-oxblood-600/30 bg-parchment-50 px-1 py-0.5"
+              role="group"
+              aria-label="Audio controls"
+            >
+              {onVoiceNudgeBackward && (
+                <button
+                  type="button"
+                  onClick={onVoiceNudgeBackward}
+                  className="rounded-full p-1 text-ink-700 hover:bg-oxblood-50 hover:text-oxblood-700"
+                  title="Rewind 10 seconds"
+                  aria-label="Rewind 10 seconds"
+                >
+                  <Rewind size={13} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onVoiceTogglePlay}
+                className="flex h-7 w-7 items-center justify-center rounded-full bg-oxblood-600 text-parchment-50 hover:bg-oxblood-700"
+                title={voicePlaying ? "Pause narration" : "Play narration"}
+                aria-label={voicePlaying ? "Pause narration" : "Play narration"}
+              >
+                {voicePlaying ? (
+                  <Pause size={12} fill="currentColor" />
+                ) : (
+                  <Play size={12} fill="currentColor" />
+                )}
+              </button>
+              {onVoiceNudgeForward && (
+                <button
+                  type="button"
+                  onClick={onVoiceNudgeForward}
+                  className="rounded-full p-1 text-ink-700 hover:bg-oxblood-50 hover:text-oxblood-700"
+                  title="Forward 10 seconds"
+                  aria-label="Forward 10 seconds"
+                >
+                  <FastForward size={13} />
+                </button>
+              )}
+            </div>
           )}
         </div>
 

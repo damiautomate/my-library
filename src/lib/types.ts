@@ -146,6 +146,21 @@ export interface VoiceSegment {
   duration: number;
   /** Character count of the source text (for cost accounting). */
   chars: number;
+  /** Per-page paragraph text covered by this segment's audio. Populated
+   * during voice generation by re-splitting each page's extracted text on
+   * blank lines, then truncating each paragraph to ~240 chars (we only need
+   * enough to do substring-matching against the rendered PDF text layer,
+   * and full text would bloat the Firestore document past 1 MB on long books).
+   * VoiceReader uses this to estimate which paragraph is currently being
+   * narrated (weighted by character count against segment duration) and
+   * broadcasts that downstream so PDFReader/EPUBReader can highlight it.
+   * Optional for backward compatibility — segments generated before this
+   * field existed continue to work with page-level (not paragraph-level)
+   * highlighting. */
+  pages_paragraphs?: Array<{
+    page: number;
+    paragraphs: string[];
+  }>;
 }
 
 // ============================================================

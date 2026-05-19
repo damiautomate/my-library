@@ -49,6 +49,22 @@ function configureCloudinary() {
 
 const PAGES_PER_SEGMENT = 10;
 
+/** Truncation cap for paragraph snippets stored on each segment. We only
+ * need enough to substring-match against the rendered PDF text layer for
+ * highlighting; longer text would bloat the Firestore document. */
+const PARA_SNIPPET_CHARS = 240;
+
+/** Split a page's extracted text into normalized paragraph snippets. */
+function splitPageIntoParagraphs(rawPageText: string): string[] {
+  if (!rawPageText.trim()) return [];
+  return rawPageText
+    .replace(/\r\n?/g, "\n")
+    .split(/\n\s*\n+/)
+    .map((p) => p.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .map((p) => (p.length > PARA_SNIPPET_CHARS ? p.slice(0, PARA_SNIPPET_CHARS) : p));
+}
+
 interface PageGroup {
   page_start: number;
   page_end: number;
@@ -261,6 +277,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 
   const realDuration = uploaded.duration ?? segDuration;
+
+  // Build pages_paragraphs for downstream paragraph-level highlighting in the
+  // PDF/EPUB readers. We split each page's extracted text into paragraphs (by
+  // blank-line breaks), truncate each to ~240 chars, and store the array.
+  const pages_paragraphs = group.pages.map((p) => ({
+    page: p.page,
+    paragraphs: splitPageIntoParagraphs(p.text),
+  }));
+
   const segment: VoiceSegment = {
     index: nextIndex + 1,
     url: uploaded.secure_url,
@@ -268,6 +293,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     page_end: group.page_end,
     duration: realDuration,
     chars: segChars,
+    pages_paragraphs,
   };
 
   const newProcessedCount = nextIndex + 1;
