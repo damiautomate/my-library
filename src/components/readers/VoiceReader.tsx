@@ -105,20 +105,10 @@ const NUDGE_SECONDS = 10;
  * timepoints this is approximate but close enough for highlighting.
  */
 /**
- * Estimate how much "speech time" a paragraph takes, used to allocate the
- * segment's duration across paragraphs.
- *
- * Pure char-counting was the previous model and it consistently put the
- * highlight 5–15 seconds ahead of the audio. The reason: TTS adds notable
- * pauses at sentence boundaries (~300–500ms each) that pure char-counting
- * doesn't account for. Sentence-dense paragraphs end up underestimated.
- *
- * This model weights:
- *   - WORDS instead of chars (slightly more stable since chars/word varies)
- *   - Each sentence-ending punctuation adds the equivalent of ~6 extra words
- *     of speech time (calibrated against Google TTS Neural2's natural pauses)
- *
- * Still approximate, but closer to actual audio pacing.
+ * Estimate how much "speech time" a paragraph takes — LEGACY FALLBACK only.
+ * Used for voice segments generated before SSML mark timepoints existed.
+ * For new segments, paragraph_timepoints gives us exact timing from Google's
+ * response, so this approximation isn't used.
  */
 function paragraphWeight(text: string): number {
   const words = text.trim().split(/\s+/).filter((w) => w.length > 0).length;
@@ -126,10 +116,66 @@ function paragraphWeight(text: string): number {
   return Math.max(1, words + sentenceEnds * 6);
 }
 
+/**
+ * Parse a markName back into (page, paragraphIndex). The format is
+ * `p{page}-{paragraphIndex}` produced during voice generation. Returns null
+ * for unrecognized formats (defensive — should never happen for marks we
+ * generated, but Firestore data is untrusted).
+ */
+function parseMarkName(
+  markName: string,
+): { page: number; paragraphIndex: number } | null {
+  const m = markName.match(/^p(\d+)-(\d+)$/);
+  if (!m) return null;
+  return {
+    page: parseInt(m[1], 10),
+    paragraphIndex: parseInt(m[2], 10),
+  };
+}
+
+/**
+ * Look up the currently-narrated paragraph for `position` seconds into the
+ * given segment. Uses the segment's recorded SSML mark timepoints when
+ * present (precise to ~10ms), otherwise falls back to word-and-sentence
+ * weighting (approximate, can drift several seconds over a long segment).
+ */
 function findCurrentParagraph(
   segment: VoiceSegment,
   position: number,
 ): NarratingParagraph | null {
+  // ---- Preferred path: use exact SSML timepoints ----
+  const tps = segment.paragraph_timepoints;
+  if (tps && tps.length > 0) {
+    // Binary search for the largest timepoint with time <= position.
+    let lo = 0;
+    let hi = tps.length - 1;
+    let best = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (tps[mid].time <= position) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (best < 0) return null; // Before the first mark — silence/intro
+    const tp = tps[best];
+    const parsed = parseMarkName(tp.markName);
+    if (!parsed) return null;
+    const pageBucket = segment.pages_paragraphs?.find(
+      (p) => p.page === parsed.page,
+    );
+    const text = pageBucket?.paragraphs[parsed.paragraphIndex] ?? "";
+    if (!text) return null;
+    return {
+      page: parsed.page,
+      paragraphIndex: parsed.paragraphIndex,
+      text,
+    };
+  }
+
+  // ---- Legacy fallback for segments without timepoints ----
   if (!segment.pages_paragraphs || segment.pages_paragraphs.length === 0)
     return null;
   const all: Array<{ page: number; index: number; text: string }> = [];

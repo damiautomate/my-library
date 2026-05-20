@@ -3,7 +3,13 @@ import { FieldValue } from "firebase-admin/firestore";
 import { v2 as cloudinary } from "cloudinary";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
 import { extractPdfFull, type PdfPage } from "@/lib/pdf-extract";
-import { getProvider, chunkText, type TTSProviderId } from "@/lib/tts";
+import {
+  buildParagraphSSML,
+  getProvider,
+  type ParagraphForSSML,
+  type Timepoint,
+  type TTSProviderId,
+} from "@/lib/tts";
 import type { VoiceSegment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -180,14 +186,31 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     });
   }
 
+  // Build the flat paragraph list for this segment, with each one carrying
+  // a unique markName so we can map the returned timepoint back to (page,
+  // paragraphIndex) at playback time.
   const group = groups[nextIndex];
-  const rawText = group.pages
-    .map((p) => p.text)
-    .join("\n\n")
-    .replace(/\s+/g, " ")
-    .trim();
+  interface FlatParagraph {
+    page: number;
+    indexOnPage: number;
+    text: string;
+    markName: string;
+  }
+  const flat: FlatParagraph[] = [];
+  for (const pg of group.pages) {
+    const paragraphs = splitPageIntoParagraphs(pg.text);
+    paragraphs.forEach((text, idx) => {
+      if (!text.trim()) return;
+      flat.push({
+        page: pg.page,
+        indexOnPage: idx,
+        text,
+        markName: `p${pg.page}-${idx}`,
+      });
+    });
+  }
 
-  if (!rawText) {
+  if (flat.length === 0) {
     // Empty segment (e.g., all blank pages) — record a placeholder and move on
     const placeholder: VoiceSegment = {
       index: nextIndex + 1,
@@ -211,16 +234,80 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     });
   }
 
-  // Synthesize. If text exceeds provider limit, split + concat MP3 bytes.
   configureCloudinary();
-  const chunks = chunkText(rawText, provider.maxCharsPerCall);
+
+  // Synthesize. We feed paragraphs as SSML with `<mark>` tags so the API
+  // returns timepoints — the EXACT second in the audio where each paragraph
+  // starts. This is the ground truth for paragraph-level highlight sync.
+  //
+  // SSML markup adds overhead, so the practical text length per call is
+  // ~3500 chars of paragraph content (provider.maxCharsPerCall is 4500 incl
+  // markup). We pack paragraphs into batches that stay under that limit,
+  // synthesize each batch, and KEEP TRACK of cumulative audio duration so
+  // every timepoint can be normalized to its offset from the start of the
+  // full combined segment audio.
   const buffers: Buffer[] = [];
   let segDuration = 0;
   let segChars = 0;
+  const allTimepoints: Timepoint[] = [];
+
+  // Pack into batches whose SSML stays under maxCharsPerCall. We probe by
+  // building the SSML and checking length.
+  interface SsmlBatch {
+    paragraphs: FlatParagraph[];
+    ssml: string;
+  }
+  const batches: SsmlBatch[] = [];
+  {
+    let currentBatch: FlatParagraph[] = [];
+    for (const p of flat) {
+      const trial = [...currentBatch, p];
+      const ssml = buildParagraphSSML(trial as ParagraphForSSML[]);
+      if (
+        ssml.length > provider.maxCharsPerCall &&
+        currentBatch.length > 0
+      ) {
+        // Flush the previous batch and start a new one with this paragraph
+        batches.push({
+          paragraphs: currentBatch,
+          ssml: buildParagraphSSML(currentBatch as ParagraphForSSML[]),
+        });
+        currentBatch = [p];
+      } else if (ssml.length > provider.maxCharsPerCall) {
+        // Single paragraph alone exceeds limit — synthesize it as plain text
+        // (no mark, so it won't appear in timepoints but the audio still gets
+        // produced; the next paragraph's mark will land correctly because
+        // batches are independent calls).
+        batches.push({
+          paragraphs: [p],
+          ssml: buildParagraphSSML([p] as ParagraphForSSML[]),
+        });
+        currentBatch = [];
+      } else {
+        currentBatch = trial;
+      }
+    }
+    if (currentBatch.length > 0) {
+      batches.push({
+        paragraphs: currentBatch,
+        ssml: buildParagraphSSML(currentBatch as ParagraphForSSML[]),
+      });
+    }
+  }
+
   try {
-    for (const chunk of chunks) {
-      const r = await provider.synthesize(chunk);
+    for (const batch of batches) {
+      const r = await provider.synthesize({ ssml: batch.ssml });
       buffers.push(r.audio);
+      // CRITICAL: Each batch's timepoints are relative to ITS audio's start.
+      // To express them relative to the full combined segment audio, we
+      // offset by the cumulative duration of all PRIOR batches.
+      for (const tp of r.timepoints) {
+        allTimepoints.push({
+          markName: tp.markName,
+          time: tp.time + segDuration,
+        });
+      }
       segDuration += r.duration;
       segChars += r.chars;
     }
@@ -279,13 +366,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   const realDuration = uploaded.duration ?? segDuration;
 
-  // Build pages_paragraphs for downstream paragraph-level highlighting in the
-  // PDF/EPUB readers. We split each page's extracted text into paragraphs (by
-  // blank-line breaks), truncate each to ~240 chars, and store the array.
-  const pages_paragraphs = group.pages.map((p) => ({
-    page: p.page,
-    paragraphs: splitPageIntoParagraphs(p.text),
-  }));
+  // Build pages_paragraphs from the same flat list we sent to TTS, so the
+  // markName format (`p{page}-{indexOnPage}`) maps correctly back to a
+  // paragraph at playback time. We also store the timepoints we captured
+  // from Google's response — together these give VoiceReader exact paragraph
+  // boundaries instead of having to estimate.
+  interface PageBucket {
+    page: number;
+    paragraphs: string[];
+  }
+  const pageBuckets = new Map<number, PageBucket>();
+  for (const p of flat) {
+    let bucket = pageBuckets.get(p.page);
+    if (!bucket) {
+      bucket = { page: p.page, paragraphs: [] };
+      pageBuckets.set(p.page, bucket);
+    }
+    // Ensure the array is indexed by indexOnPage (fill gaps with empties)
+    while (bucket.paragraphs.length <= p.indexOnPage) bucket.paragraphs.push("");
+    bucket.paragraphs[p.indexOnPage] = p.text;
+  }
+  const pages_paragraphs = Array.from(pageBuckets.values()).sort(
+    (a, b) => a.page - b.page,
+  );
 
   const segment: VoiceSegment = {
     index: nextIndex + 1,
@@ -295,6 +398,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     duration: realDuration,
     chars: segChars,
     pages_paragraphs,
+    paragraph_timepoints: allTimepoints,
   };
 
   const newProcessedCount = nextIndex + 1;

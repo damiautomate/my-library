@@ -148,18 +148,32 @@ export interface VoiceSegment {
   chars: number;
   /** Per-page paragraph text covered by this segment's audio. Populated
    * during voice generation by re-splitting each page's extracted text on
-   * blank lines, then truncating each paragraph to ~240 chars (we only need
+   * blank lines, then truncating each paragraph to ~320 chars (we only need
    * enough to do substring-matching against the rendered PDF text layer,
    * and full text would bloat the Firestore document past 1 MB on long books).
-   * VoiceReader uses this to estimate which paragraph is currently being
-   * narrated (weighted by character count against segment duration) and
-   * broadcasts that downstream so PDFReader/EPUBReader can highlight it.
-   * Optional for backward compatibility — segments generated before this
-   * field existed continue to work with page-level (not paragraph-level)
-   * highlighting. */
+   * VoiceReader uses this to look up paragraph text by markName from the
+   * timepoints below. Optional for backward compatibility — segments
+   * generated before this field existed continue to work with page-level
+   * (not paragraph-level) highlighting. */
   pages_paragraphs?: Array<{
     page: number;
     paragraphs: string[];
+  }>;
+  /** EXACT timepoints from Google TTS's SSML <mark> response — one entry per
+   * paragraph, giving the precise second in the audio where the TTS engine
+   * crosses that mark. Generated during synthesis by embedding `<mark name="pN-K"/>`
+   * before each paragraph and requesting `enableTimePointing: ["SSML_MARK"]`
+   * on the v1beta1 endpoint. When present, VoiceReader uses these for
+   * paragraph-level sync (precise to ~10 ms) instead of estimating from
+   * char/word counts. Optional for backward compatibility — segments
+   * generated before this field existed fall back to char-weighted
+   * approximation, which drifts 5-15 seconds over a long segment. */
+  paragraph_timepoints?: Array<{
+    /** Format: `p{page}-{paragraphIndex}` e.g. "p47-2" — encodes the source
+     * page and paragraph index so we can map back to pages_paragraphs. */
+    markName: string;
+    /** Seconds offset from the start of this segment's audio. */
+    time: number;
   }>;
 }
 

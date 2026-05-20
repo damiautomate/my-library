@@ -1,17 +1,36 @@
 import "server-only";
 
 /**
- * TTS provider abstraction. We start with Google Cloud TTS (cheap, free tier
- * generous, decent quality). ElevenLabs is stubbed out — when you're ready
- * to swap, just fill in the synthesize function with their API call.
+ * TTS provider abstraction. We use Google Cloud TTS via the v1beta1 endpoint
+ * so we can request SSML `<mark>` timepoints. The timepoints give us EXACT
+ * seconds in the synthesized audio for each marked location in the input
+ * text, which is what makes our paragraph-level highlighting accurate
+ * instead of guessed.
  *
- * The interface deliberately stays minimal: text in, MP3 bytes out, plus
- * approximate duration. We don't expose voice selection, sample rates, etc.
- * to the caller because those details are provider-specific and a normal
- * reading flow shouldn't care.
+ * The provider interface accepts either plain text (legacy callers) or SSML
+ * (when the caller wants mark-based timing). For SSML, you embed
+ * `<mark name="..."/>` tags between paragraphs and we'll return one
+ * `Timepoint` per mark in the response.
+ *
+ * Reference: https://cloud.google.com/text-to-speech/docs/reference/rest/v1beta1/text/synthesize
  */
 
 export type TTSProviderId = "google" | "elevenlabs";
+
+export interface Timepoint {
+  /** Name from the `<mark name="X"/>` tag in the input SSML. */
+  markName: string;
+  /** Time offset in seconds from the start of the audio. */
+  time: number;
+}
+
+export interface SynthesizeInput {
+  /** Plain text input. Mutually exclusive with `ssml`. */
+  text?: string;
+  /** SSML input with optional `<mark>` tags. When provided, the response
+   * will include `timepoints` for every mark in the SSML. */
+  ssml?: string;
+}
 
 export interface SynthesizeResult {
   /** Raw MP3 bytes. */
@@ -21,63 +40,92 @@ export interface SynthesizeResult {
   duration: number;
   /** Character count actually synthesized — for cost accounting. */
   chars: number;
+  /** Timepoints for any `<mark>` tags in the SSML input. Empty array when
+   * the input was plain text or contained no marks. */
+  timepoints: Timepoint[];
 }
 
 export interface TTSProvider {
   id: TTSProviderId;
-  /** Maximum characters per single synthesize call. Caller must chunk above this. */
+  /** Maximum characters per single synthesize call. Caller must chunk above
+   * this. For SSML this includes the markup, so the practical body length
+   * is smaller. */
   maxCharsPerCall: number;
-  synthesize(text: string): Promise<SynthesizeResult>;
+  /** True if this provider supports SSML `<mark>` timepoints. When false,
+   * the caller should not bother building SSML — pass plain text instead. */
+  supportsTimepoints: boolean;
+  synthesize(input: SynthesizeInput): Promise<SynthesizeResult>;
 }
 
 // ----------------------------------------------------------------------------
 // Google Cloud TTS
 // ----------------------------------------------------------------------------
+//
+// We use v1beta1 specifically because it's the only endpoint that supports
+// `enableTimePointing: ["SSML_MARK"]`. The v1 endpoint synthesizes fine but
+// doesn't return timepoints. v1beta1 has been stable in production use for
+// years even though it's labeled "beta".
 
-const GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize";
+const GOOGLE_TTS_URL =
+  "https://texttospeech.googleapis.com/v1beta1/text:synthesize";
+
+interface GoogleTimepoint {
+  markName?: string;
+  timeSeconds?: number;
+}
 
 interface GoogleTTSResponse {
   audioContent?: string; // base64
+  timepoints?: GoogleTimepoint[];
   error?: { message: string };
 }
 
 /**
- * Estimate MP3 duration from byte length. MP3 bitrate at our settings is 24
- * kbps (LINEAR16 → MP3 at 24000 Hz mono with default Google encoding). So:
+ * Estimate MP3 duration from byte length. Used only as a fallback when the
+ * provider doesn't report duration. Our MP3 settings give ~32 kbps:
  *   bytes / (bitrate_kbps * 1000 / 8) = seconds
- *
- * This is approximate but accurate to ~5% which is enough for page sync.
+ * Accurate to ~5%, fine for our purposes.
  */
 function estimateMp3Duration(bytes: number): number {
-  const bitrateKbps = 32; // Google's default for MP3 on standard voices
+  const bitrateKbps = 32;
   return bytes / ((bitrateKbps * 1000) / 8);
 }
 
 class GoogleProvider implements TTSProvider {
   id: TTSProviderId = "google";
-  // Google's hard limit is 5000 chars; we leave headroom.
+  // Google's hard limit per request is 5000 chars (counts SSML markup too).
   maxCharsPerCall = 4500;
+  supportsTimepoints = true;
 
-  async synthesize(text: string): Promise<SynthesizeResult> {
+  async synthesize(input: SynthesizeInput): Promise<SynthesizeResult> {
     const apiKey = process.env.GOOGLE_TTS_API_KEY;
     if (!apiKey) {
       throw new Error(
         "GOOGLE_TTS_API_KEY is not set. Create a Google Cloud project, enable the Text-to-Speech API, generate an API key, and add it to Vercel environment variables.",
       );
     }
-    if (text.length > this.maxCharsPerCall) {
+    if (!input.text && !input.ssml) {
+      throw new Error("Must provide either text or ssml");
+    }
+    if (input.text && input.ssml) {
+      throw new Error("Cannot provide both text and ssml — pick one");
+    }
+    const sourceLen = (input.ssml ?? input.text ?? "").length;
+    if (sourceLen > this.maxCharsPerCall) {
       throw new Error(
-        `Text too long for one Google TTS call (${text.length} chars; max ${this.maxCharsPerCall})`,
+        `Input too long for one Google TTS call (${sourceLen} chars; max ${this.maxCharsPerCall})`,
       );
     }
 
+    // Build the request body. We always request SSML_MARK timepoints — if
+    // the input is plain text or contains no marks, the timepoints array
+    // comes back empty, which is fine.
     const body = {
-      input: { text },
+      input: input.ssml ? { ssml: input.ssml } : { text: input.text! },
       voice: {
         languageCode: "en-US",
-        // Studio voices are highest quality but $$. Neural2 is the sweet spot:
-        // far better than Standard, much cheaper than Studio. en-US-Neural2-D
-        // is a male voice that reads narratively well.
+        // Neural2 is the sweet spot: far better than Standard, much cheaper
+        // than Studio, AND supports <mark> tags (Studio doesn't).
         name: "en-US-Neural2-D",
       },
       audioConfig: {
@@ -85,6 +133,7 @@ class GoogleProvider implements TTSProvider {
         speakingRate: 1.0,
         pitch: 0.0,
       },
+      enableTimePointing: ["SSML_MARK"],
     };
 
     const res = await fetch(`${GOOGLE_TTS_URL}?key=${apiKey}`, {
@@ -99,10 +148,20 @@ class GoogleProvider implements TTSProvider {
       );
     }
     const audio = Buffer.from(data.audioContent, "base64");
+
+    // Convert the raw Google timepoint response to our normalized shape.
+    const timepoints: Timepoint[] = (data.timepoints ?? [])
+      .filter((t) => typeof t.markName === "string" && typeof t.timeSeconds === "number")
+      .map((t) => ({
+        markName: t.markName!,
+        time: t.timeSeconds!,
+      }));
+
     return {
       audio,
       duration: estimateMp3Duration(audio.length),
-      chars: text.length,
+      chars: sourceLen,
+      timepoints,
     };
   }
 }
@@ -114,9 +173,12 @@ class GoogleProvider implements TTSProvider {
 class ElevenLabsProvider implements TTSProvider {
   id: TTSProviderId = "elevenlabs";
   maxCharsPerCall = 5000;
+  // ElevenLabs has its own streaming character-timestamp API but it works
+  // differently from SSML marks. Mark support not implemented in this stub.
+  supportsTimepoints = false;
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async synthesize(_text: string): Promise<SynthesizeResult> {
+  async synthesize(_input: SynthesizeInput): Promise<SynthesizeResult> {
     throw new Error(
       "ElevenLabs provider is not yet implemented. To enable: install the @elevenlabs/elevenlabs-js SDK (or use their REST API), set ELEVENLABS_API_KEY in env, and fill in this synthesize method.",
     );
@@ -141,19 +203,73 @@ export function getProvider(id: TTSProviderId): TTSProvider {
 }
 
 // ----------------------------------------------------------------------------
-// Text chunking
+// SSML building
+// ----------------------------------------------------------------------------
+
+/**
+ * Escape a string for safe inclusion as SSML text content. SSML is XML, so
+ * the usual five entities must be replaced. Anything else (curly quotes,
+ * em-dashes, etc.) is fine to leave alone — Google TTS handles them.
+ */
+function escapeSsmlText(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export interface ParagraphForSSML {
+  /** Identifier embedded in the mark — recovered at playback time to look up
+   * which paragraph this timestamp belongs to. Format: `p{page}-{idx}`. */
+  markName: string;
+  text: string;
+}
+
+/**
+ * Build an SSML string with a `<mark>` before each paragraph. The marks
+ * generate timepoints in the response that we use for precise paragraph-level
+ * sync. We follow Google's published guidance:
+ *
+ *   - One mark per paragraph (NOT consecutive marks)
+ *   - Each mark followed by actual speech text (no audio-less gaps)
+ *   - A short <break> between paragraphs to give natural pause and prevent
+ *     marks from landing in the gap (where they may not fire)
+ *
+ * Returns the SSML string. Caller is responsible for keeping it under the
+ * provider's maxCharsPerCall — caller should chunk paragraphs across calls
+ * if needed.
+ */
+export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
+  const parts: string[] = ['<speak>'];
+  paragraphs.forEach((p, i) => {
+    const txt = p.text.trim();
+    if (!txt) return;
+    if (i > 0) {
+      // Small pause between paragraphs — feels natural and ensures the next
+      // mark lands on actual speech, not silence.
+      parts.push('<break time="350ms"/>');
+    }
+    parts.push(`<mark name="${escapeSsmlText(p.markName)}"/>`);
+    parts.push(escapeSsmlText(txt));
+  });
+  parts.push("</speak>");
+  return parts.join("");
+}
+
+// ----------------------------------------------------------------------------
+// Text chunking (kept for backward compatibility / plain-text fallback)
 // ----------------------------------------------------------------------------
 
 /**
  * Split text into chunks <= maxChars, breaking only at sentence boundaries.
- * If a single "sentence" exceeds maxChars (rare but possible for poorly
- * extracted PDFs), we break it at the nearest space.
+ * If a single "sentence" exceeds maxChars, we break at the nearest space.
  */
 export function chunkText(text: string, maxChars: number): string[] {
   if (text.length <= maxChars) return [text];
 
   const chunks: string[] = [];
-  // Split on sentence-ending punctuation followed by whitespace
   const sentences = text.split(/(?<=[.!?])\s+/);
   let buf = "";
   for (const s of sentences) {
@@ -164,7 +280,6 @@ export function chunkText(text: string, maxChars: number): string[] {
       if (s.length <= maxChars) {
         buf = s;
       } else {
-        // Single overlong sentence — split at word boundaries
         let remaining = s;
         while (remaining.length > maxChars) {
           let cut = remaining.lastIndexOf(" ", maxChars);
