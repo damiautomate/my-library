@@ -622,6 +622,8 @@ export function VoiceReader({
     if (!playing || !current) {
       if (lastBroadcastParagraphRef.current !== null) {
         lastBroadcastParagraphRef.current = null;
+        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
+        console.log("[VOICE-SYNC] broadcast=null (paused/no-segment)");
         onNarratingParagraph?.(null);
       }
       return;
@@ -636,8 +638,17 @@ export function VoiceReader({
       return;
     }
     lastBroadcastParagraphRef.current = para;
+    // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
+    console.log("[VOICE-SYNC] broadcast", {
+      page: para?.page,
+      idx: para?.paragraphIndex,
+      audioTime: position.toFixed(2),
+      textPrefix: para?.text?.slice(0, 60) ?? null,
+      hasTimepoints: !!(current?.paragraph_timepoints?.length),
+      timepointCount: current?.paragraph_timepoints?.length ?? 0,
+    });
     onNarratingParagraph?.(para);
-  }, [playing, current, currentParagraph, onNarratingParagraph]);
+  }, [playing, current, currentParagraph, onNarratingParagraph, position]);
 
   const skipForward = useCallback(() => {
     if (segIdx < segments.length - 1) {
