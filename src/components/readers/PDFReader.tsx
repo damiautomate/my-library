@@ -279,10 +279,7 @@ export function PDFReader({
   // below depends on it — meaning the effect re-fires when render completes,
   // not just when paragraph data changes.
   const [renderedPage, setRenderedPage] = useState<number | null>(null);
-  const handlePageRenderSuccess = useCallback(() => {
-    // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-    console.log("[VOICE-SYNC] pdf onRenderSuccess", { page });
-    setRenderedPage(page);
+  const handlePageRenderSuccess = useCallback(() => {    setRenderedPage(page);
   }, [page]);
 
   // Voice-paragraph highlight. The flow:
@@ -312,17 +309,7 @@ export function PDFReader({
     // Don't even attempt highlighting if the rendered page doesn't match the
     // paragraph's target page — page transition is still in flight. Clear
     // and bail. The effect will re-fire when renderedPage catches up.
-    if (renderedPage !== currentReadingParagraph.page) {
-      // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-      console.log("[VOICE-SYNC] pdf gate=WAIT", {
-        paragraph: {
-          page: currentReadingParagraph.page,
-          idx: currentReadingParagraph.paragraphIndex,
-        },
-        renderedPage,
-        currentPageProp: page,
-      });
-      document
+    if (renderedPage !== currentReadingParagraph.page) {      document
         .querySelectorAll(".voice-para-highlight")
         .forEach((el) => el.classList.remove("voice-para-highlight"));
       lastHighlightedKeyRef.current = null;
@@ -330,21 +317,11 @@ export function PDFReader({
     }
     const key = `${currentReadingParagraph.page}-${currentReadingParagraph.paragraphIndex}`;
     if (lastHighlightedKeyRef.current === key) return;
-    // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-    console.log("[VOICE-SYNC] pdf gate=OK, attempting match", {
-      page: currentReadingParagraph.page,
-      idx: currentReadingParagraph.paragraphIndex,
-      textPrefix: currentReadingParagraph.text.slice(0, 60),
-    });
-
     const apply = () => {
       const textLayer = document.querySelector(
         ".react-pdf__Page__textContent",
       );
-      if (!textLayer) {
-        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-        console.log("[VOICE-SYNC] pdf apply: no textLayer in DOM");
-        return false;
+      if (!textLayer) {        return false;
       }
       // Clear previous
       textLayer
@@ -354,10 +331,7 @@ export function PDFReader({
       const spans = Array.from(
         textLayer.querySelectorAll("span"),
       ) as HTMLElement[];
-      if (spans.length === 0) {
-        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-        console.log("[VOICE-SYNC] pdf apply: textLayer has 0 spans");
-        return false;
+      if (spans.length === 0) {        return false;
       }
 
       // Build concatenated text + per-span offset ranges
@@ -404,15 +378,7 @@ export function PDFReader({
           break;
         }
       }
-      if (startIdx === -1) {
-        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-        console.log("[VOICE-SYNC] pdf apply: NO START MATCH", {
-          targetPrefix: fullTarget.slice(0, 80),
-          textLayerPrefix: concat.slice(0, 200),
-          spans: spans.length,
-          concatLen: concat.length,
-        });
-        return false;
+      if (startIdx === -1) {        return false;
       }
 
       // Find the END of the paragraph in the text layer. The stored snippet
@@ -466,16 +432,7 @@ export function PDFReader({
           r.el.classList.add("voice-para-highlight");
           highlightedCount++;
         }
-      }
-      // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-      console.log("[VOICE-SYNC] pdf apply: SUCCESS", {
-        startIdx,
-        highlightEnd,
-        spanLen: highlightEnd - startIdx,
-        spansHighlighted: highlightedCount,
-        totalSpans: spans.length,
-      });
-      return true;
+      }      return true;
     };
 
     // First attempt — usually succeeds because renderedPage === paragraph.page
@@ -487,19 +444,13 @@ export function PDFReader({
     // Persistent retry. Text-layer DOM is occasionally populated 1-2 frames
     // after onRenderSuccess fires. Poll every 150ms for up to 15 attempts
     // (~2.25s). Almost always lands in 1-3 attempts.
-    // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-    console.log("[VOICE-SYNC] pdf 1st-attempt failed, starting retry loop");
     let attempts = 0;
     const interval = setInterval(() => {
       attempts++;
       if (apply()) {
-        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-        console.log("[VOICE-SYNC] pdf retry SUCCEEDED on attempt", attempts);
         lastHighlightedKeyRef.current = key;
         clearInterval(interval);
       } else if (attempts >= 15) {
-        // [VOICE-SYNC] DEBUG — REMOVE AFTER DIAGNOSIS
-        console.log("[VOICE-SYNC] pdf retry GAVE UP after 15 attempts");
         clearInterval(interval);
       }
     }, 150);

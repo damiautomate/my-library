@@ -61,6 +61,62 @@ const PAGES_PER_SEGMENT = 10;
  * out of text. 320 chars covers ~50 words, plenty for matching. */
 const PARA_SNIPPET_CHARS = 320;
 
+/**
+ * Decide whether a paragraph candidate is actually a printed page number,
+ * running header/footer, SKU code, or similar metadata we should NOT send
+ * to TTS or treat as narratable content.
+ *
+ * Real-world examples found in the books we've tested:
+ *   - "5"            → page number, plain digits
+ *   - "— 4 —"        → page number wrapped in em-dashes
+ *   - "11"           → page number
+ *   - "30-0539"      → publisher SKU code on Copeland books
+ *   - "ISBN 978..."  → ISBN line
+ *   - "iv", "xii"    → roman numeral pagination in front matter
+ *
+ * Without this filter, those fragments get fed to Google TTS as paragraphs
+ * with their own SSML <mark>, which means:
+ *   1. Google narrates them aloud ("...five...", "...thirty oh five thirty
+ *      nine...") between every real paragraph — sounds like audio glitches
+ *   2. Each one consumes a paragraph slot in pages_paragraphs, so the
+ *      highlight matcher briefly tries to find "5" or "30-0539" in the text
+ *      layer and produces a meaningless single-character highlight
+ *   3. Audio time gets eaten by speaking metadata, making it feel like the
+ *      voice is "skipping" between pages
+ *
+ * The filter is intentionally conservative — short heading text like "An Act
+ * of Courage" or "Success Step 1" must NOT match (those are real content).
+ * The pattern requires the WHOLE paragraph to be metadata-shaped, not just
+ * starting with a number.
+ */
+function isMetadataParagraph(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return true;
+  // Anything longer than ~15 chars is almost certainly not a page number /
+  // SKU / ISBN — real content can be that short ("Look Up!") but the
+  // patterns below would never match real content.
+  if (trimmed.length > 15) return false;
+
+  // Pure page-number patterns: just digits, optionally wrapped in dashes,
+  // em-dashes, or whitespace.
+  if (/^[—–\-·•\s]*\d{1,4}[—–\-·•\s]*$/.test(trimmed)) return true;
+
+  // Publisher SKU codes like "30-0539" or "30-8016"
+  if (/^\d{1,3}[-–]\d{2,5}$/.test(trimmed)) return true;
+
+  // "Page N" / "p. N" / "pg N"
+  if (/^(page|pg\.?|p\.)\s*\d+$/i.test(trimmed)) return true;
+
+  // Roman numerals up to 8 chars (i, ii, iii, iv, v, vi, vii, viii, ix, x,
+  // xi, xii, xiii, etc.) — common for front matter pagination
+  if (/^[—–\-\s]*[ivxlcdm]{1,8}[—–\-\s]*$/i.test(trimmed)) return true;
+
+  // Pure punctuation / decorative characters
+  if (/^[—–\-·•*\s]+$/.test(trimmed)) return true;
+
+  return false;
+}
+
 /** Split a page's extracted text into normalized paragraph snippets. */
 function splitPageIntoParagraphs(rawPageText: string): string[] {
   if (!rawPageText.trim()) return [];
@@ -69,6 +125,7 @@ function splitPageIntoParagraphs(rawPageText: string): string[] {
     .split(/\n\s*\n+/)
     .map((p) => p.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
     .filter(Boolean)
+    .filter((p) => !isMetadataParagraph(p))
     .map((p) => (p.length > PARA_SNIPPET_CHARS ? p.slice(0, PARA_SNIPPET_CHARS) : p));
 }
 
