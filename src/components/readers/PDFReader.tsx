@@ -306,49 +306,85 @@ export function PDFReader({
       }
 
       // Normalize the target paragraph the same way as our concat for robust
-      // substring matching. We try MULTIPLE windows from the paragraph text
-      // because the first ~60 chars of two different paragraphs sometimes
-      // collide (especially when paragraphs start with common phrases like
-      // "The" or "When"). Trying a window from the middle of the paragraph
-      // gives a more unique anchor.
+      // substring matching.
       const fullTarget = currentReadingParagraph.text
         .replace(/\s+/g, " ")
         .trim();
       if (fullTarget.length < 12) return false;
 
-      const candidates: string[] = [];
-      // 1. First ~80 chars (the most common case)
-      candidates.push(fullTarget.slice(0, Math.min(80, fullTarget.length)));
-      // 2. A window from the middle, if the paragraph is long enough — this
-      //    avoids collisions with other paragraphs that start similarly
+      // Try multiple START anchors — the opening words of two adjacent
+      // paragraphs sometimes collide (especially with common openers like
+      // "The", "When", "We"), so we keep a few fallbacks.
+      const startCandidates: string[] = [];
+      startCandidates.push(fullTarget.slice(0, Math.min(80, fullTarget.length)));
       if (fullTarget.length > 100) {
         const mid = Math.floor(fullTarget.length / 2);
-        candidates.push(fullTarget.slice(mid - 30, mid + 30));
+        startCandidates.push(fullTarget.slice(mid - 30, mid + 30));
       }
-      // 3. A shorter window from the start as a last resort
       if (fullTarget.length > 24) {
-        candidates.push(fullTarget.slice(0, 24));
+        startCandidates.push(fullTarget.slice(0, 24));
       }
 
       const concatLower = concat.toLowerCase();
-      let matchIdx = -1;
-      let matchLen = 0;
-      for (const cand of candidates) {
-        const candLower = cand.toLowerCase();
-        const idx = concatLower.indexOf(candLower);
+      let startIdx = -1;
+      let startLen = 0;
+      for (const cand of startCandidates) {
+        const idx = concatLower.indexOf(cand.toLowerCase());
         if (idx !== -1) {
-          matchIdx = idx;
-          matchLen = candLower.length;
+          startIdx = idx;
+          startLen = cand.length;
           break;
         }
       }
-      if (matchIdx === -1) return false;
+      if (startIdx === -1) return false;
 
-      // Highlight up to ~250 chars from the match start — covers most of a
-      // typical paragraph instead of just a thin slice of the first sentence.
-      const highlightEnd = matchIdx + Math.min(250, fullTarget.length);
+      // Find the END of the paragraph in the text layer. The stored snippet
+      // is truncated to PARA_SNIPPET_CHARS (~320), so its last ~60 chars are
+      // close to where the actual paragraph ends in the rendered page —
+      // unless the source paragraph was longer than the snippet, in which
+      // case the end pattern lands somewhere in the middle of the actual
+      // paragraph, which is still better than overshooting into the next.
+      //
+      // Critically, the end pattern is searched AFTER the start match, so we
+      // never end up matching a later paragraph's end text by mistake.
+      const endPattern = fullTarget.slice(
+        -Math.min(60, fullTarget.length),
+      );
+      const endSearchFrom = startIdx + startLen;
+      let highlightEnd: number;
+
+      if (
+        endPattern.length >= 20 &&
+        endPattern.toLowerCase() !== startCandidates[0].toLowerCase()
+      ) {
+        const endMatchIdx = concatLower.indexOf(
+          endPattern.toLowerCase(),
+          endSearchFrom,
+        );
+        if (endMatchIdx !== -1) {
+          highlightEnd = endMatchIdx + endPattern.length;
+        } else {
+          // End pattern not found — fall back to highlighting roughly the
+          // length of the stored snippet, capped so we don't bleed into
+          // the next paragraph in the text layer.
+          highlightEnd = startIdx + fullTarget.length;
+        }
+      } else {
+        // Short paragraph — start and end overlap, just use full length
+        highlightEnd = startIdx + fullTarget.length;
+      }
+
+      // Safety cap: a runaway end-match (somehow matching way later in the
+      // page) shouldn't produce a giant highlight spanning multiple
+      // paragraphs. Limit to 1.5× the stored snippet length.
+      const maxHighlightSpan = Math.min(
+        Math.floor(fullTarget.length * 1.5),
+        500,
+      );
+      highlightEnd = Math.min(highlightEnd, startIdx + maxHighlightSpan);
+
       for (const r of ranges) {
-        if (r.end > matchIdx && r.start < highlightEnd) {
+        if (r.end > startIdx && r.start < highlightEnd) {
           r.el.classList.add("voice-para-highlight");
         }
       }

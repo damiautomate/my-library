@@ -104,6 +104,28 @@ const NUDGE_SECONDS = 10;
  * proportional to its char share of the segment total. Without SSML
  * timepoints this is approximate but close enough for highlighting.
  */
+/**
+ * Estimate how much "speech time" a paragraph takes, used to allocate the
+ * segment's duration across paragraphs.
+ *
+ * Pure char-counting was the previous model and it consistently put the
+ * highlight 5–15 seconds ahead of the audio. The reason: TTS adds notable
+ * pauses at sentence boundaries (~300–500ms each) that pure char-counting
+ * doesn't account for. Sentence-dense paragraphs end up underestimated.
+ *
+ * This model weights:
+ *   - WORDS instead of chars (slightly more stable since chars/word varies)
+ *   - Each sentence-ending punctuation adds the equivalent of ~6 extra words
+ *     of speech time (calibrated against Google TTS Neural2's natural pauses)
+ *
+ * Still approximate, but closer to actual audio pacing.
+ */
+function paragraphWeight(text: string): number {
+  const words = text.trim().split(/\s+/).filter((w) => w.length > 0).length;
+  const sentenceEnds = (text.match(/[.!?](?=\s|$)/g) || []).length;
+  return Math.max(1, words + sentenceEnds * 6);
+}
+
 function findCurrentParagraph(
   segment: VoiceSegment,
   position: number,
@@ -120,15 +142,15 @@ function findCurrentParagraph(
   }
   if (all.length === 0) return null;
   const dur = segment.duration > 0 ? segment.duration : 1;
-  const totalChars = all.reduce((s, p) => s + Math.max(1, p.text.length), 0);
-  let cumChars = 0;
+  const totalWeight = all.reduce((s, p) => s + paragraphWeight(p.text), 0);
+  let cumWeight = 0;
   for (const p of all) {
-    const chars = Math.max(1, p.text.length);
-    const endTime = ((cumChars + chars) / totalChars) * dur;
+    const w = paragraphWeight(p.text);
+    const endTime = ((cumWeight + w) / totalWeight) * dur;
     if (position < endTime) {
       return { page: p.page, paragraphIndex: p.index, text: p.text };
     }
-    cumChars += chars;
+    cumWeight += w;
   }
   const last = all[all.length - 1];
   return { page: last.page, paragraphIndex: last.index, text: last.text };
@@ -520,15 +542,32 @@ export function VoiceReader({
   // Broadcast the currently-narrated paragraph (page + index + text snippet).
   // Fires only while playing — on pause we send null so highlights clear.
   // Computed from the segment's pages_paragraphs (populated during voice
-  // generation) weighted by char count against segment duration. If the
-  // segment was generated before pages_paragraphs existed, this is a no-op
-  // and PDF/EPUB fall back to page-level highlighting only.
+  // generation) weighted by word count + sentence pauses against segment
+  // duration. If the segment was generated before pages_paragraphs existed,
+  // this is a no-op and PDF/EPUB fall back to page-level highlighting only.
+  //
+  // The timeupdate event fires ~4×/sec but the paragraph only changes every
+  // few seconds; we memoize so the parent and downstream readers don't get
+  // pummeled with re-renders for no visual change.
+  const lastBroadcastParagraphRef = useRef<NarratingParagraph | null>(null);
   useEffect(() => {
     if (!playing || !current) {
-      onNarratingParagraph?.(null);
+      if (lastBroadcastParagraphRef.current !== null) {
+        lastBroadcastParagraphRef.current = null;
+        onNarratingParagraph?.(null);
+      }
       return;
     }
     const para = findCurrentParagraph(current, position);
+    const last = lastBroadcastParagraphRef.current;
+    if (
+      para?.page === last?.page &&
+      para?.paragraphIndex === last?.paragraphIndex
+    ) {
+      // Same paragraph as last broadcast — skip
+      return;
+    }
+    lastBroadcastParagraphRef.current = para;
     onNarratingParagraph?.(para);
   }, [playing, current, position, onNarratingParagraph]);
 

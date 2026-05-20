@@ -164,6 +164,20 @@ function buildPageTextWithParagraphs(
   const medianHeight =
     heights.length > 0 ? heights[Math.floor(heights.length / 2)] : 12;
 
+  // Compute the gap between each consecutive pair of lines — this is what
+  // actually distinguishes paragraph breaks from line wraps. Using "line
+  // height" as the reference is unreliable because in dense typography a
+  // 12pt font often has 14pt line-to-line gaps but 18pt gaps between
+  // paragraphs. Using the MEASURED gaps from this specific page gives us
+  // a typography-aware threshold.
+  const gaps: number[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    gaps.push(lines[i - 1].y - lines[i].y);
+  }
+  gaps.sort((a, b) => a - b);
+  const medianGap =
+    gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)] : medianHeight;
+
   // Walk top-to-bottom, deciding for each gap whether it's a paragraph
   // break or a line wrap inside a paragraph.
   let result = "";
@@ -174,8 +188,13 @@ function buildPageTextWithParagraphs(
       const prev = lines[i - 1];
       const curr = lines[i];
       const gap = prev.y - curr.y;
-      // Threshold: ~1.6× median line height marks a paragraph break.
-      const paragraphThreshold = medianHeight * 1.6;
+      // Paragraph break threshold: 1.5x the median observed gap. Also
+      // require an absolute minimum (1.3x the line height) so a page with
+      // all paragraphs tightly packed doesn't get over-split.
+      const paragraphThreshold = Math.max(
+        medianGap * 1.5,
+        medianHeight * 1.3,
+      );
       if (gap > paragraphThreshold) {
         result += "\n\n";
       } else {
