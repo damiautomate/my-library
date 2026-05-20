@@ -49,10 +49,11 @@ function configureCloudinary() {
 
 const PAGES_PER_SEGMENT = 10;
 
-/** Truncation cap for paragraph snippets stored on each segment. We only
- * need enough to substring-match against the rendered PDF text layer for
- * highlighting; longer text would bloat the Firestore document. */
-const PARA_SNIPPET_CHARS = 240;
+/** Truncation cap for paragraph snippets stored on each segment. Needs to
+ * be long enough that PDFReader's match algorithm can try a middle-window
+ * substring (which is more unique than the opening words) without running
+ * out of text. 320 chars covers ~50 words, plenty for matching. */
+const PARA_SNIPPET_CHARS = 320;
 
 /** Split a page's extracted text into normalized paragraph snippets. */
 function splitPageIntoParagraphs(rawPageText: string): string[] {

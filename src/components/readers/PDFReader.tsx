@@ -305,23 +305,50 @@ export function PDFReader({
         if (txt && !/\s$/.test(txt)) concat += " ";
       }
 
-      // Normalize the target paragraph and the concatenated text the same way
-      // (collapse whitespace) so the substring match is robust against
-      // line-break differences between pdfjs's extraction and ours.
-      const normTarget = currentReadingParagraph.text
+      // Normalize the target paragraph the same way as our concat for robust
+      // substring matching. We try MULTIPLE windows from the paragraph text
+      // because the first ~60 chars of two different paragraphs sometimes
+      // collide (especially when paragraphs start with common phrases like
+      // "The" or "When"). Trying a window from the middle of the paragraph
+      // gives a more unique anchor.
+      const fullTarget = currentReadingParagraph.text
         .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 60);
-      if (normTarget.length < 8) return false;
+        .trim();
+      if (fullTarget.length < 12) return false;
 
-      // We need to find the target in the (non-normalized) concat to keep
-      // span offsets correct. So do a loose case-insensitive search.
-      const idx = concat.toLowerCase().indexOf(normTarget.toLowerCase());
-      if (idx === -1) return false;
-      const endIdx = idx + normTarget.length;
+      const candidates: string[] = [];
+      // 1. First ~80 chars (the most common case)
+      candidates.push(fullTarget.slice(0, Math.min(80, fullTarget.length)));
+      // 2. A window from the middle, if the paragraph is long enough — this
+      //    avoids collisions with other paragraphs that start similarly
+      if (fullTarget.length > 100) {
+        const mid = Math.floor(fullTarget.length / 2);
+        candidates.push(fullTarget.slice(mid - 30, mid + 30));
+      }
+      // 3. A shorter window from the start as a last resort
+      if (fullTarget.length > 24) {
+        candidates.push(fullTarget.slice(0, 24));
+      }
 
+      const concatLower = concat.toLowerCase();
+      let matchIdx = -1;
+      let matchLen = 0;
+      for (const cand of candidates) {
+        const candLower = cand.toLowerCase();
+        const idx = concatLower.indexOf(candLower);
+        if (idx !== -1) {
+          matchIdx = idx;
+          matchLen = candLower.length;
+          break;
+        }
+      }
+      if (matchIdx === -1) return false;
+
+      // Highlight up to ~250 chars from the match start — covers most of a
+      // typical paragraph instead of just a thin slice of the first sentence.
+      const highlightEnd = matchIdx + Math.min(250, fullTarget.length);
       for (const r of ranges) {
-        if (r.end > idx && r.start < endIdx) {
+        if (r.end > matchIdx && r.start < highlightEnd) {
           r.el.classList.add("voice-para-highlight");
         }
       }

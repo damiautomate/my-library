@@ -69,6 +69,128 @@ export async function extractPdfText(
   }
 }
 
+/**
+ * Build a single page's text WITH paragraph breaks reconstructed from
+ * pdfjs text-item positions.
+ *
+ * Why this matters: pdfjs's getTextContent() returns text fragments with
+ * their x/y coordinates but no inherent paragraph structure. A naive
+ * concatenation produces one giant line of text per page. Even with
+ * `hasEOL` markers, you get line-by-line text with no way to tell whether
+ * a line break is mid-paragraph (text wrap) or end-of-paragraph (new block).
+ *
+ * The algorithm:
+ *   1. Group text items into LINES based on similar y-coordinate
+ *   2. Sort lines top-to-bottom (PDF y-axis is bottom-up, so descending y)
+ *   3. Compute the inter-line gap between consecutive lines
+ *   4. A gap > ~1.6× the median line height = PARAGRAPH BREAK
+ *      A gap ≤ that = same paragraph, continue with a space
+ *
+ * The output has `\n\n` between paragraphs, so downstream consumers
+ * (voice generation, EPUB conversion) can split on blank lines and get
+ * actual paragraph chunks instead of one blob per page.
+ */
+function buildPageTextWithParagraphs(
+  textContent: { items: unknown[] },
+): string {
+  interface RawItem {
+    str?: string;
+    transform?: number[];
+    height?: number;
+  }
+  const rawItems = textContent.items as RawItem[];
+  if (rawItems.length === 0) return "";
+
+  interface Item {
+    str: string;
+    x: number;
+    y: number;
+    h: number;
+  }
+  const items: Item[] = [];
+  for (const it of rawItems) {
+    if (!it.str || !it.transform || it.transform.length < 6) continue;
+    const x = it.transform[4];
+    const y = it.transform[5];
+    const h = it.height ?? Math.abs(it.transform[3]) ?? 12;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    items.push({ str: it.str, x, y, h });
+  }
+  if (items.length === 0) return "";
+
+  // Group into lines by similar y. Items within ~50% of line height
+  // count as same-line (handles minor baseline jitter and inline subscripts).
+  interface Line {
+    y: number;
+    height: number;
+    items: Item[];
+  }
+  const lines: Line[] = [];
+  for (const item of items) {
+    let line = lines.find(
+      (l) => Math.abs(l.y - item.y) < Math.max(l.height, item.h) * 0.5,
+    );
+    if (!line) {
+      line = { y: item.y, height: item.h, items: [] };
+      lines.push(line);
+    } else if (item.h > line.height) {
+      line.height = item.h;
+    }
+    line.items.push(item);
+  }
+
+  // Top-to-bottom: in PDF user-space, larger y = higher on page
+  lines.sort((a, b) => b.y - a.y);
+  // Left-to-right within each line
+  for (const line of lines) {
+    line.items.sort((a, b) => a.x - b.x);
+  }
+
+  // Stitch line text. PDF text items often arrive with NO trailing spaces
+  // between fragments, so we add a space when concatenating across items
+  // unless the previous fragment already ended in whitespace.
+  const lineTexts = lines.map((l) => {
+    let out = "";
+    for (const it of l.items) {
+      if (out && !/\s$/.test(out) && !/^\s/.test(it.str)) out += " ";
+      out += it.str;
+    }
+    return out.replace(/\s+/g, " ").trim();
+  });
+
+  // Compute median line height — robust against outlier headers/footers
+  const heights = lines.map((l) => l.height).filter((h) => h > 0);
+  heights.sort((a, b) => a - b);
+  const medianHeight =
+    heights.length > 0 ? heights[Math.floor(heights.length / 2)] : 12;
+
+  // Walk top-to-bottom, deciding for each gap whether it's a paragraph
+  // break or a line wrap inside a paragraph.
+  let result = "";
+  for (let i = 0; i < lines.length; i++) {
+    const text = lineTexts[i];
+    if (!text) continue;
+    if (i > 0) {
+      const prev = lines[i - 1];
+      const curr = lines[i];
+      const gap = prev.y - curr.y;
+      // Threshold: ~1.6× median line height marks a paragraph break.
+      const paragraphThreshold = medianHeight * 1.6;
+      if (gap > paragraphThreshold) {
+        result += "\n\n";
+      } else {
+        // Same paragraph — join with a space (NOT a newline) so the
+        // downstream `.split(/\n\s*\n+/)` only splits on real paragraph
+        // boundaries.
+        result += " ";
+      }
+    }
+    result += text;
+  }
+
+  return result;
+}
+
 // ----------------------------------------------------------------------------
 // Full-book extraction for PDF → EPUB conversion and TTS audio generation.
 // ----------------------------------------------------------------------------
@@ -120,17 +242,7 @@ export async function extractPdfFull(pdfUrl: string): Promise<ExtractedPdf> {
     try {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
-      const text = content.items
-        .map((it: unknown) => {
-          const item = it as { str?: string; hasEOL?: boolean };
-          // Preserve line breaks where pdf.js detected them — improves
-          // paragraph reconstruction downstream.
-          return item.hasEOL ? (item.str ?? "") + "\n" : item.str ?? "";
-        })
-        .join(" ")
-        .replace(/[ \t]+/g, " ")
-        .replace(/ ?\n ?/g, "\n")
-        .trim();
+      const text = buildPageTextWithParagraphs(content);
       pages.push({ page: i, text });
     } catch (err) {
       console.warn(`[pdf-extract-full] page ${i} failed`, err);
