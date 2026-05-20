@@ -264,10 +264,53 @@ export function PDFReader({
   // background color to those spans creates a colored rectangle over the
   // text on the canvas. CSS for the class is injected globally so it works
   // across all rendered pages.
+  // Track which PDF page is currently FULLY RENDERED. react-pdf doesn't
+  // synchronously update the text layer when `pageNumber` changes — it
+  // unmounts the old page, renders the new canvas, then attaches the text
+  // layer DOM. During that gap (50-800ms depending on page complexity), the
+  // .react-pdf__Page__textContent element either doesn't exist yet or
+  // belongs to the OLD page. Running our highlight matcher in that window
+  // silently fails because it can't find the target paragraph text.
+  //
+  // The Page's `onRenderSuccess` callback fires after both the canvas AND
+  // the text layer are mounted and populated, so it's our signal that
+  // matching is safe to attempt. We store the page number that's actually
+  // rendered (not the one we asked for) in state, and the highlight effect
+  // below depends on it — meaning the effect re-fires when render completes,
+  // not just when paragraph data changes.
+  const [renderedPage, setRenderedPage] = useState<number | null>(null);
+  const handlePageRenderSuccess = useCallback(() => {
+    setRenderedPage(page);
+  }, [page]);
+
+  // Voice-paragraph highlight. The flow:
+  //   1. Voice broadcasts a new paragraph via `currentReadingParagraph`
+  //   2. If the paragraph is on a different page, livePage auto-advances and
+  //      react-pdf starts rendering the new page
+  //   3. Once render completes, `renderedPage` updates (via onRenderSuccess)
+  //   4. This effect fires with both the paragraph and the rendered page
+  //      matching — we look up the paragraph text in the text layer and add
+  //      `.voice-para-highlight` to the spans that cover that range
+  //
+  // We retain a small retry loop after the gating condition is satisfied
+  // because the text-layer DOM is occasionally populated a frame or two
+  // AFTER onRenderSuccess fires (race between react-pdf internals). 15
+  // attempts at 150ms gives us a ~2.25s ceiling, which always exceeds the
+  // observed worst case (~800ms for a 1200×1800px page).
   const lastHighlightedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!currentReadingParagraph || currentReadingParagraph.page !== page) {
-      // Wrong page or no target — clear any existing highlight
+    if (!currentReadingParagraph) {
+      // No paragraph data — clear any existing highlight
+      document
+        .querySelectorAll(".voice-para-highlight")
+        .forEach((el) => el.classList.remove("voice-para-highlight"));
+      lastHighlightedKeyRef.current = null;
+      return;
+    }
+    // Don't even attempt highlighting if the rendered page doesn't match the
+    // paragraph's target page — page transition is still in flight. Clear
+    // and bail. The effect will re-fire when renderedPage catches up.
+    if (renderedPage !== currentReadingParagraph.page) {
       document
         .querySelectorAll(".voice-para-highlight")
         .forEach((el) => el.classList.remove("voice-para-highlight"));
@@ -391,18 +434,27 @@ export function PDFReader({
       return true;
     };
 
-    // Try immediately, then with a small delay in case the text layer is
-    // still rendering (page transitions take ~50-150ms).
-    const ok = apply();
-    if (ok) {
+    // First attempt — usually succeeds because renderedPage === paragraph.page
+    if (apply()) {
       lastHighlightedKeyRef.current = key;
-    } else {
-      const timer = setTimeout(() => {
-        if (apply()) lastHighlightedKeyRef.current = key;
-      }, 200);
-      return () => clearTimeout(timer);
+      return;
     }
-  }, [currentReadingParagraph, page]);
+
+    // Persistent retry. Text-layer DOM is occasionally populated 1-2 frames
+    // after onRenderSuccess fires. Poll every 150ms for up to 15 attempts
+    // (~2.25s). Almost always lands in 1-3 attempts.
+    let attempts = 0;
+    const interval = setInterval(() => {
+      attempts++;
+      if (apply()) {
+        lastHighlightedKeyRef.current = key;
+        clearInterval(interval);
+      } else if (attempts >= 15) {
+        clearInterval(interval);
+      }
+    }, 150);
+    return () => clearInterval(interval);
+  }, [currentReadingParagraph, renderedPage]);
 
   // ----- Keyboard nav -----------------------------------------------------
   useEffect(() => {
@@ -798,6 +850,7 @@ export function PDFReader({
               width={renderWidth}
               renderTextLayer
               renderAnnotationLayer
+              onRenderSuccess={handlePageRenderSuccess}
             />
           </Document>
         </div>
