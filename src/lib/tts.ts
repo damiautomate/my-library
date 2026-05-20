@@ -207,12 +207,22 @@ export function getProvider(id: TTSProviderId): TTSProvider {
 // ----------------------------------------------------------------------------
 
 /**
- * Escape a string for safe inclusion as SSML text content. SSML is XML, so
- * the usual five entities must be replaced. Anything else (curly quotes,
- * em-dashes, etc.) is fine to leave alone — Google TTS handles them.
+ * Escape a string for safe inclusion as SSML text content. SSML is XML, so:
+ *   - the standard five entities must be replaced (&, <, >, ", ')
+ *   - any character outside XML 1.0's legal range must be REMOVED (escaping
+ *     won't make them legal). PDF text extraction occasionally emits stray
+ *     control characters (NUL, bell, vertical tab, etc.) from malformed font
+ *     mappings, and these would silently truncate the SSML at parse time —
+ *     causing Google to drop everything after the bad character without
+ *     reporting an error. Stripping them up front prevents that.
  */
 function escapeSsmlText(s: string): string {
   return s
+    // Strip ASCII control chars except tab (\x09), LF (\x0A), CR (\x0D)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
+    // Strip the two Unicode non-characters that are explicitly invalid in XML
+    .replace(/[\uFFFE\uFFFF]/g, "")
+    // Standard XML entity escaping
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -242,7 +252,14 @@ export interface ParagraphForSSML {
  * if needed.
  */
 export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
-  const parts: string[] = ['<speak>'];
+  // The leading <break time="100ms"/> exists because Google's documentation
+  // warns: "Use the START and END marks instead of adding custom marks near
+  // the beginning or end of the SSML." A custom mark placed at the very start
+  // of <speak> can fail to generate a timepoint event — which would mean the
+  // first paragraph of every segment becomes "untimed" and the player can't
+  // tell when it begins. The 100ms intro silence pushes the first mark off
+  // the absolute start, making sure it fires reliably.
+  const parts: string[] = ['<speak>', '<break time="100ms"/>'];
   paragraphs.forEach((p, i) => {
     const txt = p.text.trim();
     if (!txt) return;

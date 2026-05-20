@@ -300,12 +300,36 @@ export function VoiceReader({
   const totalElapsed = elapsedBefore + position;
 
   /**
-   * Estimate the "current page" being narrated. We interpolate linearly
-   * within the segment's page range based on how far through the audio
-   * we are. Imperfect (TTS doesn't read at constant page-rate due to
-   * page-length variation) but close enough for sync.
+   * The paragraph the audio is CURRENTLY narrating, computed from the segment's
+   * SSML mark timepoints (precise to ~10ms when timepoints exist) or from
+   * word/sentence weighting as a fallback for legacy segments. We memoize this
+   * because it's used by TWO downstream consumers — `currentPage` below for
+   * PDF auto-follow, and the broadcast effect for PDF/EPUB paragraph
+   * highlighting — and we want both fed by the same source of truth so they
+   * can never disagree (which would manifest as the PDF flipping ahead while
+   * the highlight is still on the previous page).
+   */
+  const currentParagraph = useMemo(() => {
+    if (!current) return null;
+    return findCurrentParagraph(current, position);
+  }, [current, position]);
+
+  /**
+   * The PDF page the audio is currently narrating.
+   *
+   * PREFERRED: derive from `currentParagraph.page` when timepoints are
+   * available. This makes the PDF follower exactly track the audio — when
+   * the narration moves from page 41 to page 42, the page indicator flips
+   * at the same moment, not when linear interpolation guesses.
+   *
+   * FALLBACK: linear interpolation across the segment's page range, used
+   * for old voice segments that were generated before SSML timepoints
+   * existed. This is the original imperfect behavior (assumes each page
+   * takes equal time, which it doesn't), but it's better than nothing for
+   * legacy data.
    */
   const currentPage = useMemo(() => {
+    if (currentParagraph) return currentParagraph.page;
     if (!current) return initialPage;
     const segProgress = current.duration > 0 ? position / current.duration : 0;
     const pageSpan = current.page_end - current.page_start + 1;
@@ -313,7 +337,7 @@ export function VoiceReader({
       current.page_end,
       current.page_start + Math.floor(segProgress * pageSpan),
     );
-  }, [current, position, initialPage]);
+  }, [currentParagraph, current, position, initialPage]);
 
   // Persist progress with the page tracking convention shared by PDF/EPUB.
   // We persist FOUR fields here:
@@ -585,16 +609,14 @@ export function VoiceReader({
     onPlayingChange?.(playing);
   }, [playing, onPlayingChange]);
 
-  // Broadcast the currently-narrated paragraph (page + index + text snippet).
-  // Fires only while playing — on pause we send null so highlights clear.
-  // Computed from the segment's pages_paragraphs (populated during voice
-  // generation) weighted by word count + sentence pauses against segment
-  // duration. If the segment was generated before pages_paragraphs existed,
-  // this is a no-op and PDF/EPUB fall back to page-level highlighting only.
+  // Broadcast the currently-narrated paragraph (page + index + text snippet)
+  // to PDF/EPUB readers for highlighting. Fires only while playing — on pause
+  // we send null so highlights clear.
   //
-  // The timeupdate event fires ~4×/sec but the paragraph only changes every
-  // few seconds; we memoize so the parent and downstream readers don't get
-  // pummeled with re-renders for no visual change.
+  // Source: the memoized `currentParagraph` above, which uses SSML timepoints
+  // when available. The timeupdate event fires ~4×/sec but the paragraph only
+  // changes every few seconds; we compare against the last broadcast value so
+  // downstream readers don't re-render on no-op updates.
   const lastBroadcastParagraphRef = useRef<NarratingParagraph | null>(null);
   useEffect(() => {
     if (!playing || !current) {
@@ -604,7 +626,7 @@ export function VoiceReader({
       }
       return;
     }
-    const para = findCurrentParagraph(current, position);
+    const para = currentParagraph;
     const last = lastBroadcastParagraphRef.current;
     if (
       para?.page === last?.page &&
@@ -615,7 +637,7 @@ export function VoiceReader({
     }
     lastBroadcastParagraphRef.current = para;
     onNarratingParagraph?.(para);
-  }, [playing, current, position, onNarratingParagraph]);
+  }, [playing, current, currentParagraph, onNarratingParagraph]);
 
   const skipForward = useCallback(() => {
     if (segIdx < segments.length - 1) {
