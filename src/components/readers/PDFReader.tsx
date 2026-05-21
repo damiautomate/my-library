@@ -53,11 +53,17 @@ interface PDFReaderProps {
   /** The specific paragraph being narrated right now (page + index + a text
    * snippet for matching). When set, the PDF text layer is searched for the
    * paragraph text and matching spans get the .voice-para-highlight class
-   * applied. Requires voice segments generated after Phase 9e. */
+   * applied. Requires voice segments generated after Phase 9e. The nextText /
+   * nextIsSamePage fields (Phase 9p) let us anchor the highlight's END
+   * boundary on the start of the next paragraph instead of trying to match
+   * the current paragraph's tail — far more reliable across PDF layout
+   * quirks (ligatures, hyphenation, etc.). */
   currentReadingParagraph?: {
     page: number;
     paragraphIndex: number;
     text: string;
+    nextText?: string | null;
+    nextIsSamePage?: boolean;
   } | null;
   /** Whether the voice reader is currently playing — drives the mini-player
    * play/pause icon in the PDF toolbar. */
@@ -381,50 +387,78 @@ export function PDFReader({
       if (startIdx === -1) {        return false;
       }
 
-      // Find the END of the paragraph in the text layer. The stored snippet
-      // is truncated to PARA_SNIPPET_CHARS (~320), so its last ~60 chars are
-      // close to where the actual paragraph ends in the rendered page —
-      // unless the source paragraph was longer than the snippet, in which
-      // case the end pattern lands somewhere in the middle of the actual
-      // paragraph, which is still better than overshooting into the next.
+      // Find the END of the paragraph in the text layer. Phase 9p strategy:
       //
-      // Critically, the end pattern is searched AFTER the start match, so we
-      // never end up matching a later paragraph's end text by mistake.
-      const endPattern = fullTarget.slice(
-        -Math.min(60, fullTarget.length),
-      );
+      // 1. PREFERRED: if VoiceReader gave us nextText (first 60 chars of the
+      //    next paragraph) AND it's on the same source page, search for it
+      //    in concatLower AFTER the start match. The position where it lands
+      //    is exactly where THIS paragraph ends. This dodges all the issues
+      //    with trying to match the tail of the current paragraph (ligatures,
+      //    hyphenation across lines, end-text shared with adjacent paragraphs,
+      //    etc.) — we just need to find a unique-enough next-paragraph
+      //    opener and we get a clean boundary.
+      //
+      // 2. LAST-ON-PAGE: if nextIsSamePage is false, this paragraph is the
+      //    last on the rendered page — highlight extends to the end of the
+      //    concat (everything after start = the rest of the page's text).
+      //
+      // 3. FALLBACK: if nextText isn't found (rare — e.g., next paragraph
+      //    opens with text that doesn't render verbatim in the text layer),
+      //    try multiple end-anchors from the current paragraph at decreasing
+      //    lengths (60, 40, 25). The shorter the anchor the more likely it
+      //    matches, with the tradeoff that it's less specific.
+      //
+      // 4. LAST RESORT: use 1.4× fullTarget.length as a permissive bound.
+      //    The 1.4× factor accounts for the inter-span spaces we add to
+      //    concat that aren't in fullTarget (so concat length > extracted
+      //    length for the same visual paragraph).
+      let highlightEnd: number = -1;
+      const para = currentReadingParagraph;
       const endSearchFrom = startIdx + startLen;
-      let highlightEnd: number;
 
-      if (
-        endPattern.length >= 20 &&
-        endPattern.toLowerCase() !== startCandidates[0].toLowerCase()
-      ) {
-        const endMatchIdx = concatLower.indexOf(
-          endPattern.toLowerCase(),
-          endSearchFrom,
-        );
-        if (endMatchIdx !== -1) {
-          highlightEnd = endMatchIdx + endPattern.length;
-        } else {
-          // End pattern not found — fall back to highlighting roughly the
-          // length of the stored snippet, capped so we don't bleed into
-          // the next paragraph in the text layer.
-          highlightEnd = startIdx + fullTarget.length;
+      if (para.nextText && para.nextIsSamePage && para.nextText.length >= 20) {
+        const nextLower = para.nextText.toLowerCase();
+        const nextMatchIdx = concatLower.indexOf(nextLower, endSearchFrom);
+        if (nextMatchIdx !== -1) {
+          highlightEnd = nextMatchIdx; // stop right where next paragraph starts
         }
-      } else {
-        // Short paragraph — start and end overlap, just use full length
-        highlightEnd = startIdx + fullTarget.length;
+      } else if (!para.nextIsSamePage) {
+        // Current is the last paragraph on this page — highlight to end.
+        highlightEnd = concat.length;
       }
 
-      // Safety cap: a runaway end-match (somehow matching way later in the
-      // page) shouldn't produce a giant highlight spanning multiple
-      // paragraphs. Limit to 1.5× the stored paragraph length, with a high
-      // absolute ceiling for long paragraphs (e.g. Bible quotes, block
-      // quotes) that legitimately span most of a page.
+      if (highlightEnd === -1) {
+        // Fallback: try end-anchors from the CURRENT paragraph at decreasing
+        // lengths. The shorter ones are more permissive — match more often,
+        // but less precise about exact end position.
+        for (const endLen of [60, 40, 25]) {
+          if (fullTarget.length < endLen + 12) continue;
+          const cand = fullTarget.slice(-endLen).toLowerCase();
+          if (cand === startCandidates[0].toLowerCase()) continue;
+          const idx = concatLower.indexOf(cand, endSearchFrom);
+          if (idx !== -1) {
+            highlightEnd = idx + endLen;
+            break;
+          }
+        }
+      }
+
+      if (highlightEnd === -1) {
+        // Last resort — bound by extracted length with a permissive multiplier
+        // for the inter-span spaces concat picks up. Not as tight as the
+        // preferred path but better than a hard truncation.
+        highlightEnd = startIdx + Math.floor(fullTarget.length * 1.4);
+      }
+
+      // Safety cap: with nextText we're naturally bounded, but the fallback
+      // paths could in theory match late in the page. Cap at a generous
+      // multiple of the extracted text length, with a high absolute ceiling
+      // for legitimately long paragraphs (block quotes, Bible passages, legal
+      // preambles). Phase 9p loosened this from 1.5× / 2500 → 3× / 5000 to
+      // accommodate the inter-span space inflation in concat.
       const maxHighlightSpan = Math.min(
-        Math.floor(fullTarget.length * 1.5),
-        2500,
+        Math.floor(fullTarget.length * 3),
+        5000,
       );
       highlightEnd = Math.min(highlightEnd, startIdx + maxHighlightSpan);
 

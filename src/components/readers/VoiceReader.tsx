@@ -32,6 +32,17 @@ export interface NarratingParagraph {
   page: number;
   paragraphIndex: number;
   text: string;
+  /** First ~60 chars of the NEXT distinct paragraph after this one (across
+   * sub-marks and across pages). PDFReader uses this as a hard stop boundary
+   * for the highlight — finding where N+1 starts in the text layer tells us
+   * exactly where N ends, which is far more reliable than trying to match
+   * the end of N's own text against the rendered spans. Null only when this
+   * is the very last paragraph of the segment. Phase 9p. */
+  nextText: string | null;
+  /** True when the next paragraph is on the SAME source page as this one.
+   * When false (next is on a later page, OR there is no next), the highlight
+   * should extend to the end of the rendered text layer for this page. */
+  nextIsSamePage: boolean;
 }
 
 /**
@@ -144,11 +155,26 @@ function parseMarkName(
  * given segment. Uses the segment's recorded SSML mark timepoints when
  * present (precise to ~10ms), otherwise falls back to word-and-sentence
  * weighting (approximate, can drift several seconds over a long segment).
+ *
+ * Also returns the FIRST 60 chars of the next distinct paragraph plus a
+ * flag for whether it's on the same source page — the PDF highlight matcher
+ * uses this as a stop boundary so the highlight doesn't undershoot on long
+ * paragraphs (Phase 9p).
  */
 function findCurrentParagraph(
   segment: VoiceSegment,
   position: number,
 ): NarratingParagraph | null {
+  // Look up paragraph text from pages_paragraphs given a parsed markName.
+  const lookupText = (
+    parsed: { page: number; paragraphIndex: number },
+  ): string => {
+    const pageBucket = segment.pages_paragraphs?.find(
+      (p) => p.page === parsed.page,
+    );
+    return pageBucket?.paragraphs[parsed.paragraphIndex] ?? "";
+  };
+
   // ---- Preferred path: use exact SSML timepoints ----
   const tps = segment.paragraph_timepoints;
   if (tps && tps.length > 0) {
@@ -169,15 +195,33 @@ function findCurrentParagraph(
     const tp = tps[best];
     const parsed = parseMarkName(tp.markName);
     if (!parsed) return null;
-    const pageBucket = segment.pages_paragraphs?.find(
-      (p) => p.page === parsed.page,
-    );
-    const text = pageBucket?.paragraphs[parsed.paragraphIndex] ?? "";
+    const text = lookupText(parsed);
     if (!text) return null;
+
+    // Scan forward for the NEXT distinct paragraph (skip sub-marks, which
+    // share parsed.paragraphIndex). We need its leading text so the PDF
+    // matcher can find a hard end-boundary for our highlight.
+    let nextText: string | null = null;
+    let nextIsSamePage = false;
+    for (let i = best + 1; i < tps.length; i++) {
+      const np = parseMarkName(tps[i].markName);
+      if (!np) continue;
+      if (np.page === parsed.page && np.paragraphIndex === parsed.paragraphIndex) {
+        continue; // sub-mark of current paragraph
+      }
+      const nt = lookupText(np);
+      if (!nt) continue;
+      nextText = nt.slice(0, Math.min(60, nt.length));
+      nextIsSamePage = np.page === parsed.page;
+      break;
+    }
+
     return {
       page: parsed.page,
       paragraphIndex: parsed.paragraphIndex,
       text,
+      nextText,
+      nextIsSamePage,
     };
   }
 
@@ -196,16 +240,30 @@ function findCurrentParagraph(
   const dur = segment.duration > 0 ? segment.duration : 1;
   const totalWeight = all.reduce((s, p) => s + paragraphWeight(p.text), 0);
   let cumWeight = 0;
-  for (const p of all) {
+  for (let i = 0; i < all.length; i++) {
+    const p = all[i];
     const w = paragraphWeight(p.text);
     const endTime = ((cumWeight + w) / totalWeight) * dur;
     if (position < endTime) {
-      return { page: p.page, paragraphIndex: p.index, text: p.text };
+      const next = all[i + 1];
+      return {
+        page: p.page,
+        paragraphIndex: p.index,
+        text: p.text,
+        nextText: next ? next.text.slice(0, 60) : null,
+        nextIsSamePage: next ? next.page === p.page : false,
+      };
     }
     cumWeight += w;
   }
   const last = all[all.length - 1];
-  return { page: last.page, paragraphIndex: last.index, text: last.text };
+  return {
+    page: last.page,
+    paragraphIndex: last.index,
+    text: last.text,
+    nextText: null,
+    nextIsSamePage: false,
+  };
 }
 
 function fmt(sec: number): string {
