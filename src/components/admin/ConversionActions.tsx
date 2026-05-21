@@ -92,12 +92,23 @@ export function ConversionActions({ book, onChanged }: Props) {
     let done = false;
     let totalChars = 0;
     let firstCall = true;
+    // Per-segment retry counter. Vercel hobby tier 504s, network blips, and
+    // transient Google TTS hiccups all warrant a quiet retry — the route is
+    // idempotent on retry because nextIndex = existing.length, so the same
+    // segment is re-attempted until it succeeds. We only surface a hard
+    // error after MAX_RETRIES failures on the SAME segment.
+    let retries = 0;
+    const MAX_RETRIES = 3;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     while (!done) {
       if (cancelVoiceRef.current) {
         setVoiceErr("Stopped — partial segments saved on the book.");
         break;
       }
+
+      let transientFailure: string | null = null;
+      let fatalFailure: string | null = null;
       try {
         const res = await fetch(`/api/books/${book.id}/generate-voice`, {
           method: "POST",
@@ -107,34 +118,74 @@ export function ConversionActions({ book, onChanged }: Props) {
           },
           body: JSON.stringify({
             provider: "google",
-            // Wipe existing segments only on the very first call after the user
-            // confirmed a re-gen — subsequent calls in this loop are appends.
+            // Wipe existing segments only on the very first call after the
+            // user confirmed a re-gen — subsequent calls are appends.
             reset: firstCall && reset,
           }),
         });
-        firstCall = false;
 
-        // Vercel returns plain-text "An error occurred..." on timeout — guard
-        // against that so we don't crash with a JSON parse error.
         const ct = res.headers.get("content-type") ?? "";
         if (!ct.includes("application/json")) {
+          // Vercel returns plain-text "An error occurred..." on timeout.
+          // 5xx without JSON is almost always a transient infra issue —
+          // retry. Other statuses are unexpected — bail.
           const text = await res.text();
-          throw new Error(
-            `Server returned non-JSON (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`,
-          );
+          if (res.status >= 500) {
+            transientFailure = `Segment timeout (HTTP ${res.status})`;
+          } else {
+            fatalFailure = `Server returned non-JSON (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`;
+          }
+        } else {
+          const data = await res.json();
+          if (!res.ok) {
+            // 5xx with JSON error message — retry. 4xx is a client/auth
+            // problem we can't recover from by retrying.
+            if (res.status >= 500) {
+              transientFailure = data.error ?? `Server error (${res.status})`;
+            } else {
+              fatalFailure = data.error ?? `Failed (status ${res.status})`;
+            }
+          } else {
+            // SUCCESS — advance and reset retry counter
+            firstCall = false;
+            retries = 0;
+            setVoiceProgress({ done: data.processed, total: data.total });
+            if (data.segment) totalChars += data.segment.chars ?? 0;
+            done = !!data.done;
+            setVoiceErr(null);
+            continue;
+          }
         }
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error ?? `Failed (status ${res.status})`);
-        }
-
-        setVoiceProgress({ done: data.processed, total: data.total });
-        if (data.segment) totalChars += data.segment.chars ?? 0;
-        done = !!data.done;
       } catch (err) {
-        setVoiceErr(err instanceof Error ? err.message : String(err));
-        break;
+        // Network errors, JSON parse errors, etc. — always retryable since
+        // they're typically transient connectivity blips.
+        transientFailure = err instanceof Error ? err.message : String(err);
       }
+
+      // We got here via a failure. Decide retry vs bail.
+      if (transientFailure && retries < MAX_RETRIES && !cancelVoiceRef.current) {
+        retries++;
+        const segNum = (voiceProgress?.done ?? 0) + 1;
+        setVoiceErr(
+          `Segment ${segNum} hit a snag (${transientFailure}). Retrying ${retries}/${MAX_RETRIES}…`,
+        );
+        // Mild backoff — first retry quick, later ones slower. The cache from
+        // 9o means subsequent calls skip PDF extraction, so even the slow
+        // ones tend to succeed on retry.
+        await sleep(2000 * retries);
+        continue;
+      }
+
+      // Out of retries, or a fatal error.
+      const completed = voiceProgress?.done ?? 0;
+      const segNum = completed + 1;
+      const finalMsg =
+        fatalFailure ??
+        (transientFailure
+          ? `Couldn't complete segment ${segNum} after ${MAX_RETRIES + 1} tries (${transientFailure}). ${completed} segments saved — click Re-generate to resume from segment ${segNum}.`
+          : "Unknown error.");
+      setVoiceErr(finalMsg);
+      break;
     }
 
     if (done) {

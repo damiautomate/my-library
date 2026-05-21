@@ -100,6 +100,13 @@ export interface BookDoc {
   voice_segments?: VoiceSegment[];
   voice_provider?: "google" | "elevenlabs";
   voice_total_seconds?: number;
+  /** Cloudinary raw URL of the cached PDF extraction JSON (Phase 9o). The
+   * generate-voice route extracts the entire PDF once on the first segment
+   * call (10-30s for big books), then caches the result here so subsequent
+   * segment calls fetch a small JSON instead of re-parsing the PDF. This
+   * keeps each call under Vercel's 60s function timeout. Cleared on the
+   * client's reset=true call so a new PDF triggers a fresh extraction. */
+  voice_extraction_url?: string;
 
   // External links
   amazon_url?: string;

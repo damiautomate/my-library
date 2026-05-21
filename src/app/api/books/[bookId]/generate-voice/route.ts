@@ -228,17 +228,82 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       : [];
   const nextIndex = existing.length;
 
-  // Extract PDF — we have to do this every call because we don't cache the
-  // text. Takes 10-30s for big books. The bulk of each call's time budget.
-  let extracted;
-  try {
-    extracted = await extractPdfFull(book.pdf_url);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { error: `PDF extraction failed: ${msg}` },
-      { status: 502 },
-    );
+  // Extract PDF — but cache the result. For a 500-page book this used to
+  // take 10-30s on EVERY segment call (the route fires once per ~10-page
+  // segment), which routinely blew through Vercel's 60s function ceiling
+  // around segment 6-10. Now we extract once, write the JSON to Cloudinary
+  // as a raw asset, store its URL on the book doc, and fetch it on every
+  // subsequent call (~300ms over CDN vs. ~20s of pdf.js parsing).
+  //
+  // Cache lifecycle:
+  //   - First call: no cache → extract → upload → store URL on book doc
+  //   - Subsequent calls: fetch cached JSON
+  //   - body.reset === true: ignore cache → re-extract → overwrite (so a new
+  //     PDF upload triggers a fresh extraction)
+  //
+  // Storage shape on Cloudinary:
+  //   resource_type=raw, public_id=`${bookId}-extraction` with overwrite,
+  //   so the URL is stable and old extractions get replaced cleanly.
+  configureCloudinary();
+  let extracted: Awaited<ReturnType<typeof extractPdfFull>> | null = null;
+  const cachedUrl = book.voice_extraction_url as string | undefined;
+  if (cachedUrl && !body.reset) {
+    try {
+      const r = await fetch(cachedUrl, { cache: "no-store" });
+      if (r.ok) {
+        extracted = (await r.json()) as Awaited<
+          ReturnType<typeof extractPdfFull>
+        >;
+      }
+    } catch {
+      // Fall through to re-extract — cache fetch failures shouldn't block
+    }
+  }
+  if (!extracted) {
+    try {
+      extracted = await extractPdfFull(book.pdf_url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { error: `PDF extraction failed: ${msg}` },
+        { status: 502 },
+      );
+    }
+    // Upload the JSON to Cloudinary and pin the URL on the book doc for
+    // future calls. Failure to cache is not fatal — we just lose the speedup
+    // on future calls (next call will re-extract from PDF again).
+    try {
+      const json = JSON.stringify(extracted);
+      const cacheUpload = await new Promise<{ secure_url: string }>(
+        (resolve, reject) => {
+          cloudinary.uploader
+            .upload_stream(
+              {
+                folder: `my-library/books/${bookId}/extraction`,
+                public_id: `${bookId}-extraction`,
+                resource_type: "raw",
+                format: "json",
+                overwrite: true,
+              },
+              (err, result) => {
+                if (err || !result)
+                  reject(err ?? new Error("Cloudinary returned no result"));
+                else resolve({ secure_url: result.secure_url });
+              },
+            )
+            .end(Buffer.from(json));
+        },
+      );
+      await bookRef.update({
+        voice_extraction_url: cacheUpload.secure_url,
+        updated_at: FieldValue.serverTimestamp(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[VOICE-EXTRACT-CACHE] Failed to cache extraction for ${bookId}: ${msg}. Next call will re-extract.`,
+      );
+    }
   }
   if (extracted.pages.filter((p) => p.text.trim()).length === 0) {
     return NextResponse.json(
@@ -340,8 +405,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       skipped_empty: true,
     });
   }
-
-  configureCloudinary();
 
   // Synthesize. We feed paragraphs as SSML with `<mark>` tags so the API
   // returns timepoints — the EXACT second in the audio where each paragraph
