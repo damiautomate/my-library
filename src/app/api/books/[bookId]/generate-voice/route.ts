@@ -55,12 +55,6 @@ function configureCloudinary() {
 
 const PAGES_PER_SEGMENT = 10;
 
-/** Truncation cap for paragraph snippets stored on each segment. Needs to
- * be long enough that PDFReader's match algorithm can try a middle-window
- * substring (which is more unique than the opening words) without running
- * out of text. 320 chars covers ~50 words, plenty for matching. */
-const PARA_SNIPPET_CHARS = 320;
-
 /**
  * Decide whether a paragraph candidate is actually a printed page number,
  * running header/footer, SKU code, or similar metadata we should NOT send
@@ -69,55 +63,46 @@ const PARA_SNIPPET_CHARS = 320;
  * Real-world examples found in the books we've tested:
  *   - "5"            → page number, plain digits
  *   - "— 4 —"        → page number wrapped in em-dashes
- *   - "11"           → page number
  *   - "30-0539"      → publisher SKU code on Copeland books
- *   - "ISBN 978..."  → ISBN line
  *   - "iv", "xii"    → roman numeral pagination in front matter
  *
- * Without this filter, those fragments get fed to Google TTS as paragraphs
- * with their own SSML <mark>, which means:
- *   1. Google narrates them aloud ("...five...", "...thirty oh five thirty
- *      nine...") between every real paragraph — sounds like audio glitches
- *   2. Each one consumes a paragraph slot in pages_paragraphs, so the
- *      highlight matcher briefly tries to find "5" or "30-0539" in the text
- *      layer and produces a meaningless single-character highlight
- *   3. Audio time gets eaten by speaking metadata, making it feel like the
- *      voice is "skipping" between pages
- *
- * The filter is intentionally conservative — short heading text like "An Act
- * of Courage" or "Success Step 1" must NOT match (those are real content).
- * The pattern requires the WHOLE paragraph to be metadata-shaped, not just
- * starting with a number.
+ * The filter is conservative — short heading text like "An Act of Courage"
+ * or "Look Up!" must NOT match. The pattern requires the WHOLE paragraph to
+ * be metadata-shaped, not just to start with a number.
  */
 function isMetadataParagraph(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return true;
-  // Anything longer than ~15 chars is almost certainly not a page number /
-  // SKU / ISBN — real content can be that short ("Look Up!") but the
-  // patterns below would never match real content.
   if (trimmed.length > 15) return false;
-
-  // Pure page-number patterns: just digits, optionally wrapped in dashes,
-  // em-dashes, or whitespace.
   if (/^[—–\-·•\s]*\d{1,4}[—–\-·•\s]*$/.test(trimmed)) return true;
-
-  // Publisher SKU codes like "30-0539" or "30-8016"
   if (/^\d{1,3}[-–]\d{2,5}$/.test(trimmed)) return true;
-
-  // "Page N" / "p. N" / "pg N"
   if (/^(page|pg\.?|p\.)\s*\d+$/i.test(trimmed)) return true;
-
-  // Roman numerals up to 8 chars (i, ii, iii, iv, v, vi, vii, viii, ix, x,
-  // xi, xii, xiii, etc.) — common for front matter pagination
   if (/^[—–\-\s]*[ivxlcdm]{1,8}[—–\-\s]*$/i.test(trimmed)) return true;
-
-  // Pure punctuation / decorative characters
   if (/^[—–\-·•*\s]+$/.test(trimmed)) return true;
-
   return false;
 }
 
-/** Split a page's extracted text into normalized paragraph snippets. */
+/** Hard cap on how many chars of a single paragraph we'll send to TTS in
+ * one Google call. Google's SSML limit is 5000 chars per request including
+ * markup; we keep paragraphs well under that so each one fits in a single
+ * call regardless of batching. Paragraphs longer than this (rare — typically
+ * only block-quoted Bible chapters or legal preambles) get split at sentence
+ * boundaries into pseudo-paragraphs that share the same mark prefix. */
+const TTS_PARAGRAPH_CHAR_CAP = 3500;
+
+/**
+ * Split a page's extracted text into FULL paragraph strings (no truncation).
+ *
+ * Previously this function truncated each paragraph to 320 chars to keep
+ * the per-segment Firestore document small. That truncation was applied to
+ * the SAME text we sent to Google TTS — meaning any paragraph longer than
+ * 320 chars got its tail amputated before synthesis, so Google literally
+ * never narrated the rest. That was the cause of "audio skipping" reports.
+ *
+ * Now we keep paragraphs at their natural length. The caller is responsible
+ * for any TTS-side chunking (see TTS_PARAGRAPH_CHAR_CAP) and for any storage
+ * truncation done at write time.
+ */
 function splitPageIntoParagraphs(rawPageText: string): string[] {
   if (!rawPageText.trim()) return [];
   return rawPageText
@@ -125,8 +110,44 @@ function splitPageIntoParagraphs(rawPageText: string): string[] {
     .split(/\n\s*\n+/)
     .map((p) => p.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
     .filter(Boolean)
-    .filter((p) => !isMetadataParagraph(p))
-    .map((p) => (p.length > PARA_SNIPPET_CHARS ? p.slice(0, PARA_SNIPPET_CHARS) : p));
+    .filter((p) => !isMetadataParagraph(p));
+}
+
+/**
+ * Split a single paragraph at sentence boundaries into chunks that each fit
+ * under TTS_PARAGRAPH_CHAR_CAP. Used for the rare extra-long paragraph that
+ * can't fit in one SSML request.
+ *
+ * Returns the original paragraph in a single-element array if it's already
+ * under the cap.
+ */
+function chunkLongParagraph(text: string): string[] {
+  if (text.length <= TTS_PARAGRAPH_CHAR_CAP) return [text];
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const chunks: string[] = [];
+  let buf = "";
+  for (const s of sentences) {
+    if (buf.length + s.length + 1 <= TTS_PARAGRAPH_CHAR_CAP) {
+      buf = buf ? `${buf} ${s}` : s;
+    } else {
+      if (buf) chunks.push(buf);
+      if (s.length <= TTS_PARAGRAPH_CHAR_CAP) {
+        buf = s;
+      } else {
+        // Single sentence exceeds cap — last resort, break at nearest space
+        let remaining = s;
+        while (remaining.length > TTS_PARAGRAPH_CHAR_CAP) {
+          let cut = remaining.lastIndexOf(" ", TTS_PARAGRAPH_CHAR_CAP);
+          if (cut === -1) cut = TTS_PARAGRAPH_CHAR_CAP;
+          chunks.push(remaining.slice(0, cut));
+          remaining = remaining.slice(cut).trimStart();
+        }
+        buf = remaining;
+      }
+    }
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
 }
 
 interface PageGroup {
@@ -246,6 +267,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // Build the flat paragraph list for this segment, with each one carrying
   // a unique markName so we can map the returned timepoint back to (page,
   // paragraphIndex) at playback time.
+  //
+  // Each visual paragraph becomes ONE entry in this list (mark = `p{page}-{idx}`).
+  // If a paragraph exceeds the per-call SSML size cap, we split it at
+  // sentence boundaries into chunks sharing the same `indexOnPage` but with
+  // sub-marks (`p{page}-{idx}.{sub}`). At playback the sub-mark prefix maps
+  // back to the parent paragraph for highlighting purposes — sub-paragraphs
+  // are invisible to the user; they just keep the audio flowing without
+  // bumping into Google's 5000-char SSML limit on a single request.
   const group = groups[nextIndex];
   interface FlatParagraph {
     page: number;
@@ -258,12 +287,33 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const paragraphs = splitPageIntoParagraphs(pg.text);
     paragraphs.forEach((text, idx) => {
       if (!text.trim()) return;
-      flat.push({
-        page: pg.page,
-        indexOnPage: idx,
-        text,
-        markName: `p${pg.page}-${idx}`,
-      });
+      const chunks = chunkLongParagraph(text);
+      if (chunks.length === 1) {
+        flat.push({
+          page: pg.page,
+          indexOnPage: idx,
+          text: chunks[0],
+          markName: `p${pg.page}-${idx}`,
+        });
+      } else {
+        // Long paragraph split into sub-chunks. Only the FIRST sub-chunk
+        // keeps the canonical mark `p{page}-{idx}` (so the highlight binds
+        // to the paragraph's start time). Subsequent sub-chunks get
+        // sub-marks so timepoints can still be returned, but the lookup
+        // in VoiceReader parses the prefix and treats them as the same
+        // paragraph.
+        chunks.forEach((chunk, subIdx) => {
+          flat.push({
+            page: pg.page,
+            indexOnPage: idx,
+            text: chunk,
+            markName:
+              subIdx === 0
+                ? `p${pg.page}-${idx}`
+                : `p${pg.page}-${idx}.${subIdx}`,
+          });
+        });
+      }
     });
   }
 
@@ -425,9 +475,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   // Build pages_paragraphs from the same flat list we sent to TTS, so the
   // markName format (`p{page}-{indexOnPage}`) maps correctly back to a
-  // paragraph at playback time. We also store the timepoints we captured
-  // from Google's response — together these give VoiceReader exact paragraph
-  // boundaries instead of having to estimate.
+  // paragraph at playback time. Sub-chunks of an over-long paragraph share
+  // the same indexOnPage, so we concatenate them to reconstruct the full
+  // paragraph text.
+  //
+  // We store the FULL paragraph text (not a truncated snippet) so that the
+  // PDF highlight matcher can find both the start anchor (first ~80 chars)
+  // AND the end anchor (last ~60 chars) at the actual paragraph boundaries
+  // — that's what lets the highlight cover the entire visual paragraph
+  // instead of just the first few lines.
+  //
+  // Firestore impact: a 500-page book averages ~250 paragraphs × ~300 chars
+  // = ~75 KB of paragraph text per book, well under the 1 MB document limit.
   interface PageBucket {
     page: number;
     paragraphs: string[];
@@ -439,9 +498,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       bucket = { page: p.page, paragraphs: [] };
       pageBuckets.set(p.page, bucket);
     }
-    // Ensure the array is indexed by indexOnPage (fill gaps with empties)
     while (bucket.paragraphs.length <= p.indexOnPage) bucket.paragraphs.push("");
-    bucket.paragraphs[p.indexOnPage] = p.text;
+    // If a previous sub-chunk already stored text here, concatenate; this
+    // restores the full paragraph for the matcher even though we sent it
+    // to Google in multiple SSML calls.
+    const existingHere = bucket.paragraphs[p.indexOnPage];
+    bucket.paragraphs[p.indexOnPage] = existingHere
+      ? `${existingHere} ${p.text}`
+      : p.text;
   }
   const pages_paragraphs = Array.from(pageBuckets.values()).sort(
     (a, b) => a.page - b.page,

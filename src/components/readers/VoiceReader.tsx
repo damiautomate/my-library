@@ -118,14 +118,20 @@ function paragraphWeight(text: string): number {
 
 /**
  * Parse a markName back into (page, paragraphIndex). The format is
- * `p{page}-{paragraphIndex}` produced during voice generation. Returns null
- * for unrecognized formats (defensive — should never happen for marks we
- * generated, but Firestore data is untrusted).
+ * `p{page}-{paragraphIndex}` for normal paragraphs, or
+ * `p{page}-{paragraphIndex}.{subIndex}` for sub-chunks of an over-long
+ * paragraph that had to be split across multiple SSML requests. Both forms
+ * resolve to the same (page, paragraphIndex) — sub-chunks are invisible at
+ * the highlight layer; they exist only so the audio can flow through long
+ * paragraphs without bumping into Google's per-request size limit.
+ *
+ * Returns null for unrecognized formats (defensive — should never happen
+ * for marks we generated, but Firestore data is untrusted).
  */
 function parseMarkName(
   markName: string,
 ): { page: number; paragraphIndex: number } | null {
-  const m = markName.match(/^p(\d+)-(\d+)$/);
+  const m = markName.match(/^p(\d+)-(\d+)(?:\.\d+)?$/);
   if (!m) return null;
   return {
     page: parseInt(m[1], 10),

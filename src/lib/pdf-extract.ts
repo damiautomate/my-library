@@ -164,12 +164,7 @@ function buildPageTextWithParagraphs(
   const medianHeight =
     heights.length > 0 ? heights[Math.floor(heights.length / 2)] : 12;
 
-  // Compute the gap between each consecutive pair of lines — this is what
-  // actually distinguishes paragraph breaks from line wraps. Using "line
-  // height" as the reference is unreliable because in dense typography a
-  // 12pt font often has 14pt line-to-line gaps but 18pt gaps between
-  // paragraphs. Using the MEASURED gaps from this specific page gives us
-  // a typography-aware threshold.
+  // Compute the gap between each consecutive pair of lines.
   const gaps: number[] = [];
   for (let i = 1; i < lines.length; i++) {
     gaps.push(lines[i - 1].y - lines[i].y);
@@ -178,8 +173,51 @@ function buildPageTextWithParagraphs(
   const medianGap =
     gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)] : medianHeight;
 
-  // Walk top-to-bottom, deciding for each gap whether it's a paragraph
-  // break or a line wrap inside a paragraph.
+  // PRIMARY paragraph signal: first-line indent.
+  //
+  // In typeset books (especially the Copeland-style and most fiction/non-fiction
+  // we deal with), paragraphs are marked by indenting the first line by an em
+  // or two while subsequent lines flush to the body margin. This is the most
+  // reliable paragraph-break signal — far more reliable than y-gap, which
+  // false-positives on descenders, kerning quirks, and inline graphics.
+  //
+  // Algorithm:
+  //   1. Compute the x-position of each line's leftmost item
+  //   2. The MODE of those x-positions is the body's left margin (most lines
+  //      flush to it)
+  //   3. A line whose x is meaningfully greater than the body margin is an
+  //      INDENTED line → paragraph start
+  //   4. A line whose x equals the body margin is a CONTINUATION line
+  //
+  // Y-gap stays as a secondary signal for the cases indent can't catch:
+  //   - The FIRST paragraph on a page (no previous line to compare to)
+  //   - Headings (often centered, not flush-left, but separated by big gaps)
+  //   - Block quotes ending and body resuming
+  //
+  // For y-gap we use a CONSERVATIVE 2.0× median threshold so we don't false-
+  // positive on typography quirks within paragraphs.
+  const leftXs = lines.map((l) => l.items[0]?.x ?? 0);
+  // Compute mode by bucketing to nearest integer point (PDF user-space units
+  // are typically points, so 1-point precision is plenty).
+  const xBuckets = new Map<number, number>();
+  for (const x of leftXs) {
+    const b = Math.round(x);
+    xBuckets.set(b, (xBuckets.get(b) ?? 0) + 1);
+  }
+  let bodyMarginX = leftXs[0] ?? 0;
+  let bestCount = 0;
+  for (const [b, count] of xBuckets) {
+    if (count > bestCount) {
+      bestCount = count;
+      bodyMarginX = b;
+    }
+  }
+  // Indent threshold: a line counts as indented (= paragraph start) when its
+  // x is >4pt to the right of the body margin. 4pt ≈ ¼ of a typical body em,
+  // small enough to catch a single-em indent (which is common) but large
+  // enough not to false-positive on sub-point rendering jitter.
+  const indentThreshold = bodyMarginX + 4;
+
   let result = "";
   for (let i = 0; i < lines.length; i++) {
     const text = lineTexts[i];
@@ -187,15 +225,15 @@ function buildPageTextWithParagraphs(
     if (i > 0) {
       const prev = lines[i - 1];
       const curr = lines[i];
+      const currX = curr.items[0]?.x ?? bodyMarginX;
       const gap = prev.y - curr.y;
-      // Paragraph break threshold: 1.5x the median observed gap. Also
-      // require an absolute minimum (1.3x the line height) so a page with
-      // all paragraphs tightly packed doesn't get over-split.
-      const paragraphThreshold = Math.max(
-        medianGap * 1.5,
-        medianHeight * 1.3,
-      );
-      if (gap > paragraphThreshold) {
+      const isIndented = currX > indentThreshold;
+      // Conservative y-gap fallback — only paragraph-break on REALLY big
+      // gaps, not on typography wobble. 2× median catches actual paragraph
+      // separators (headings, block quote boundaries) without splitting
+      // body text.
+      const yGapBreak = gap > Math.max(medianGap * 2.0, medianHeight * 1.6);
+      if (isIndented || yGapBreak) {
         result += "\n\n";
       } else {
         // Same paragraph — join with a space (NOT a newline) so the

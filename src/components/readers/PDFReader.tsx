@@ -419,10 +419,12 @@ export function PDFReader({
 
       // Safety cap: a runaway end-match (somehow matching way later in the
       // page) shouldn't produce a giant highlight spanning multiple
-      // paragraphs. Limit to 1.5× the stored snippet length.
+      // paragraphs. Limit to 1.5× the stored paragraph length, with a high
+      // absolute ceiling for long paragraphs (e.g. Bible quotes, block
+      // quotes) that legitimately span most of a page.
       const maxHighlightSpan = Math.min(
         Math.floor(fullTarget.length * 1.5),
-        500,
+        2500,
       );
       highlightEnd = Math.min(highlightEnd, startIdx + maxHighlightSpan);
 
