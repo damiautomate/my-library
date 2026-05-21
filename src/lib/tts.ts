@@ -81,12 +81,115 @@ interface GoogleTTSResponse {
 }
 
 /**
- * Estimate MP3 duration from byte length. Used only as a fallback when the
- * provider doesn't report duration. Our MP3 settings give ~32 kbps:
- *   bytes / (bitrate_kbps * 1000 / 8) = seconds
- * Accurate to ~5%, fine for our purposes.
+ * Compute the EXACT duration of an MP3 buffer by walking its frame headers.
+ *
+ * Each MP3 frame self-describes: bitrate, sample rate, padding bit, and
+ * (implicitly) sample count. Frame duration = samples_per_frame / sample_rate.
+ * Total duration = sum of all frame durations.
+ *
+ * This replaced the prior estimateMp3DurationByBytes() which assumed a fixed
+ * 32 kbps bitrate. That assumption was the cause of paragraph-highlight
+ * drift in multi-batch segments: each batch's reported duration was used to
+ * offset the NEXT batch's SSML mark timepoints (see generate-voice/route.ts:
+ * `time: tp.time + segDuration`), so any error in per-batch duration
+ * accumulated across batches. With each batch boundary, the stored timepoints
+ * drifted further from real playback position — manifesting as the highlight
+ * "freezing" on the last paragraph of one batch while audio played through
+ * the next batch, then jumping ahead and being desynced for the rest of the
+ * segment. Parsing actual frame headers gives sub-frame precision (~24ms at
+ * 24kHz / MPEG-2 Layer 3) regardless of the encoder's bitrate choice.
+ *
+ * Returns 0 if no valid MP3 frames are found — callers should fall back
+ * to estimateMp3DurationByBytes() in that case.
  */
-function estimateMp3Duration(bytes: number): number {
+function mp3FrameDuration(buf: Buffer): number {
+  // Bitrate tables (kbps). Index 0 = "free format" (unsupported), 15 = invalid.
+  const BITRATE_V1_L3 = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, -1,
+  ];
+  const BITRATE_V2_L3 = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, -1,
+  ];
+  const SR_V1 = [44100, 48000, 32000, 0];
+  const SR_V2 = [22050, 24000, 16000, 0];
+  const SR_V25 = [11025, 12000, 8000, 0];
+
+  let pos = 0;
+  // Skip ID3v2 tag if present (magic "ID3" at offset 0).
+  if (
+    buf.length >= 10 &&
+    buf[0] === 0x49 &&
+    buf[1] === 0x44 &&
+    buf[2] === 0x33
+  ) {
+    const sz =
+      ((buf[6] & 0x7f) << 21) |
+      ((buf[7] & 0x7f) << 14) |
+      ((buf[8] & 0x7f) << 7) |
+      (buf[9] & 0x7f);
+    pos = 10 + sz;
+  }
+
+  let duration = 0;
+  while (pos + 4 <= buf.length) {
+    // Sync = 11 set bits (0xFFE) at the start of the header.
+    if (buf[pos] !== 0xff || (buf[pos + 1] & 0xe0) !== 0xe0) {
+      pos++;
+      continue;
+    }
+    const b1 = buf[pos + 1];
+    const b2 = buf[pos + 2];
+    const versionBits = (b1 >> 3) & 0x03; // 00=V2.5, 01=reserved, 10=V2, 11=V1
+    const layerBits = (b1 >> 1) & 0x03; // 01=L3, 10=L2, 11=L1, 00=reserved
+    const bitrateIdx = (b2 >> 4) & 0x0f;
+    const srIdx = (b2 >> 2) & 0x03;
+    const padding = (b2 >> 1) & 0x01;
+
+    // Only Layer 3 (MP3). Reject reserved/invalid fields.
+    if (
+      versionBits === 1 ||
+      layerBits !== 1 ||
+      bitrateIdx === 0 ||
+      bitrateIdx === 15 ||
+      srIdx === 3
+    ) {
+      pos++;
+      continue;
+    }
+    const isV1 = versionBits === 3;
+    const isV2 = versionBits === 2;
+    const bitrateTable = isV1 ? BITRATE_V1_L3 : BITRATE_V2_L3;
+    const srTable = isV1 ? SR_V1 : isV2 ? SR_V2 : SR_V25;
+    const samplesPerFrame = isV1 ? 1152 : 576;
+    const bitrate = bitrateTable[bitrateIdx] * 1000;
+    const sr = srTable[srIdx];
+    if (!bitrate || !sr) {
+      pos++;
+      continue;
+    }
+    // Layer 3 frame size formula:
+    //   MPEG-1:        floor(144 * bitrate / sr) + padding
+    //   MPEG-2 / 2.5:  floor(72  * bitrate / sr) + padding
+    const frameSize = isV1
+      ? Math.floor((144 * bitrate) / sr) + padding
+      : Math.floor((72 * bitrate) / sr) + padding;
+    if (frameSize < 4 || pos + frameSize > buf.length) {
+      pos++;
+      continue;
+    }
+
+    duration += samplesPerFrame / sr;
+    pos += frameSize;
+  }
+  return duration;
+}
+
+/**
+ * Last-resort fallback when frame parsing returns 0 (buffer isn't a
+ * recognizable MP3 stream). Assumes 32 kbps — Google TTS MP3's documented
+ * default — but should rarely run, because real MP3 audio always parses.
+ */
+function estimateMp3DurationByBytes(bytes: number): number {
   const bitrateKbps = 32;
   return bytes / ((bitrateKbps * 1000) / 8);
 }
@@ -157,9 +260,17 @@ class GoogleProvider implements TTSProvider {
         time: t.timeSeconds!,
       }));
 
+    // CRITICAL: use frame-based duration, not a bitrate guess. The per-batch
+    // duration is used as the offset for the NEXT batch's timepoints, so any
+    // error compounds across batches. See mp3FrameDuration above for the full
+    // story of why a 32 kbps assumption broke paragraph-highlight sync.
+    const framed = mp3FrameDuration(audio);
+    const duration =
+      framed > 0 ? framed : estimateMp3DurationByBytes(audio.length);
+
     return {
       audio,
-      duration: estimateMp3Duration(audio.length),
+      duration,
       chars: sourceLen,
       timepoints,
     };
@@ -207,22 +318,12 @@ export function getProvider(id: TTSProviderId): TTSProvider {
 // ----------------------------------------------------------------------------
 
 /**
- * Escape a string for safe inclusion as SSML text content. SSML is XML, so:
- *   - the standard five entities must be replaced (&, <, >, ", ')
- *   - any character outside XML 1.0's legal range must be REMOVED (escaping
- *     won't make them legal). PDF text extraction occasionally emits stray
- *     control characters (NUL, bell, vertical tab, etc.) from malformed font
- *     mappings, and these would silently truncate the SSML at parse time —
- *     causing Google to drop everything after the bad character without
- *     reporting an error. Stripping them up front prevents that.
+ * Escape a string for safe inclusion as SSML text content. SSML is XML, so
+ * the usual five entities must be replaced. Anything else (curly quotes,
+ * em-dashes, etc.) is fine to leave alone — Google TTS handles them.
  */
 function escapeSsmlText(s: string): string {
   return s
-    // Strip ASCII control chars except tab (\x09), LF (\x0A), CR (\x0D)
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
-    // Strip the two Unicode non-characters that are explicitly invalid in XML
-    .replace(/[\uFFFE\uFFFF]/g, "")
-    // Standard XML entity escaping
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -252,14 +353,7 @@ export interface ParagraphForSSML {
  * if needed.
  */
 export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
-  // The leading <break time="100ms"/> exists because Google's documentation
-  // warns: "Use the START and END marks instead of adding custom marks near
-  // the beginning or end of the SSML." A custom mark placed at the very start
-  // of <speak> can fail to generate a timepoint event — which would mean the
-  // first paragraph of every segment becomes "untimed" and the player can't
-  // tell when it begins. The 100ms intro silence pushes the first mark off
-  // the absolute start, making sure it fires reliably.
-  const parts: string[] = ['<speak>', '<break time="100ms"/>'];
+  const parts: string[] = ['<speak>'];
   paragraphs.forEach((p, i) => {
     const txt = p.text.trim();
     if (!txt) return;

@@ -473,6 +473,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   const realDuration = uploaded.duration ?? segDuration;
 
+  // [VOICE-SYNC-9N] One-line diagnostic per segment. If the highlight is in
+  // sync, you should see segDuration(parsed) ≈ realDuration(cloudinary) within
+  // ~50ms, AND lastTp's time close to (but slightly less than) realDuration.
+  // If they diverge, the MP3 frame parser in tts.ts may not be recognizing
+  // Google's output — file a phase 9o ticket with this log line.
+  const firstTp = allTimepoints[0];
+  const lastTp = allTimepoints[allTimepoints.length - 1];
+  console.log(
+    `[VOICE-SYNC-9N] seg=${nextIndex + 1}/${total} ` +
+      `pages=${group.page_start}-${group.page_end} ` +
+      `batches=${batches.length} ` +
+      `segDuration(parsed)=${segDuration.toFixed(3)}s ` +
+      `realDuration(cloudinary)=${realDuration.toFixed(3)}s ` +
+      `delta=${(realDuration - segDuration).toFixed(3)}s ` +
+      `timepoints=${allTimepoints.length} ` +
+      `firstTp=${firstTp ? `${firstTp.markName}@${firstTp.time.toFixed(2)}` : "none"} ` +
+      `lastTp=${lastTp ? `${lastTp.markName}@${lastTp.time.toFixed(2)}` : "none"}`,
+  );
+
   // Build pages_paragraphs from the same flat list we sent to TTS, so the
   // markName format (`p{page}-{indexOnPage}`) maps correctly back to a
   // paragraph at playback time. Sub-chunks of an over-long paragraph share
