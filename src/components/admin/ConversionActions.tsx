@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { Loader2, BookOpenCheck, Headphones, CheckCircle2, X } from "lucide-react";
 import { auth as firebaseAuth } from "@/lib/firebase/client";
 import type { Book } from "@/lib/types";
+import { NarratorPicker } from "./NarratorPicker";
 
 interface Props {
   book: Book;
@@ -249,6 +250,14 @@ export function ConversionActions({ book, onChanged }: Props) {
       {convertErr && (
         <p className="mt-2 text-xs text-oxblood-700">{convertErr}</p>
       )}
+
+      {/* Narrator picker — sits between EPUB conversion and voice generation
+       * so the user chooses WHO will read the book before clicking generate. */}
+      <NarratorPicker
+        book={book}
+        hasVoice={hasVoice}
+        onChanged={onChanged}
+      />
 
       {/* Generate voice row */}
       <div className="mt-3 flex flex-wrap items-start justify-between gap-3">

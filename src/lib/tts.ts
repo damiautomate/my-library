@@ -30,6 +30,20 @@ export interface SynthesizeInput {
   /** SSML input with optional `<mark>` tags. When provided, the response
    * will include `timepoints` for every mark in the SSML. */
   ssml?: string;
+  /** Google TTS voice name override (Phase 9q). Defaults to en-US-Neural2-D
+   * when omitted to preserve the pre-9q behavior. Examples:
+   *   "en-US-Neural2-F"     → Fiona (synced)
+   *   "en-US-Studio-O"      → Olivia (premium, Studio)
+   *   "en-US-Chirp3-HD-F"   → Faye (premium, Chirp — text-only) */
+  voiceId?: string;
+  /** Language code for the voice. Should match the chosen voice's region:
+   * "en-US" for Neural2/Studio US voices, "en-GB" for British, etc. Defaults
+   * to "en-US". */
+  languageCode?: string;
+  /** Whether to request SSML mark timepoints. Default true so existing callers
+   * keep working. Set false for Studio voices (which reject `<mark>`) and
+   * Chirp 3 HD (which rejects SSML entirely). */
+  requestTimepoints?: boolean;
 }
 
 export interface SynthesizeResult {
@@ -220,24 +234,28 @@ class GoogleProvider implements TTSProvider {
       );
     }
 
-    // Build the request body. We always request SSML_MARK timepoints — if
-    // the input is plain text or contains no marks, the timepoints array
-    // comes back empty, which is fine.
-    const body = {
+    // Build the request body. Voice and timepointing are now caller-driven
+    // (Phase 9q) — Neural2/News voices support marks, Studio voices don't,
+    // Chirp 3 HD doesn't even accept SSML. Defaults preserve the pre-9q
+    // behavior exactly: Neural2-D + timepointing on.
+    const voiceName = input.voiceId ?? "en-US-Neural2-D";
+    const languageCode = input.languageCode ?? "en-US";
+    const requestTimepoints = input.requestTimepoints ?? true;
+    const body: Record<string, unknown> = {
       input: input.ssml ? { ssml: input.ssml } : { text: input.text! },
       voice: {
-        languageCode: "en-US",
-        // Neural2 is the sweet spot: far better than Standard, much cheaper
-        // than Studio, AND supports <mark> tags (Studio doesn't).
-        name: "en-US-Neural2-D",
+        languageCode,
+        name: voiceName,
       },
       audioConfig: {
         audioEncoding: "MP3",
         speakingRate: 1.0,
         pitch: 0.0,
       },
-      enableTimePointing: ["SSML_MARK"],
     };
+    if (requestTimepoints) {
+      body.enableTimePointing = ["SSML_MARK"];
+    }
 
     const res = await fetch(`${GOOGLE_TTS_URL}?key=${apiKey}`, {
       method: "POST",
@@ -367,6 +385,40 @@ export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
   });
   parts.push("</speak>");
   return parts.join("");
+}
+
+/**
+ * Premium-mode SSML — same idea as buildParagraphSSML but WITHOUT marks,
+ * for Studio voices which reject `<mark>` (Phase 9q). Paragraph breaks are
+ * still expressed via `<break time>` so the listener gets natural pacing.
+ * Returns null when the caller should use plain text instead (Chirp 3 HD).
+ */
+export function buildParagraphSSMLNoMarks(
+  paragraphs: ParagraphForSSML[],
+): string {
+  const parts: string[] = ["<speak>"];
+  paragraphs.forEach((p, i) => {
+    const txt = p.text.trim();
+    if (!txt) return;
+    if (i > 0) parts.push('<break time="350ms"/>');
+    parts.push(escapeSsmlText(txt));
+  });
+  parts.push("</speak>");
+  return parts.join("");
+}
+
+/**
+ * Plain-text fallback for Chirp 3 HD voices, which reject SSML entirely.
+ * Paragraphs are joined with double-newlines — Chirp's prosody engine seems
+ * to honor these as paragraph breaks even without explicit markup.
+ */
+export function buildParagraphPlainText(
+  paragraphs: ParagraphForSSML[],
+): string {
+  return paragraphs
+    .map((p) => p.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 // ----------------------------------------------------------------------------

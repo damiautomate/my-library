@@ -107,6 +107,19 @@ export interface BookDoc {
    * keeps each call under Vercel's 60s function timeout. Cleared on the
    * client's reset=true call so a new PDF triggers a fresh extraction. */
   voice_extraction_url?: string;
+  /** Google TTS voice name used for this book's audio (Phase 9q). Exact
+   * IDs from VOICE_CATALOG in src/lib/voices.ts. Undefined means "use the
+   * default narrator" — preserves backward compat for books generated before
+   * the picker existed. When this is changed and differs from the voice that
+   * actually generated existing segments, generate-voice auto-resets so we
+   * never end up with a book whose audio is a mix of two voices. */
+  voice_id?: string;
+  /** Narration mode — derived from the chosen voice's catalog entry. "synced"
+   * uses Neural2/News voices that support SSML mark timepoints (paragraph
+   * highlight sync). "premium" uses Studio/Chirp voices (best audio quality
+   * but no live highlight). Stored on the book so the player can show a
+   * "Premium audio" indicator and disable highlight UI when relevant. */
+  voice_mode?: "synced" | "premium";
 
   // External links
   amazon_url?: string;
@@ -182,6 +195,11 @@ export interface VoiceSegment {
     /** Seconds offset from the start of this segment's audio. */
     time: number;
   }>;
+  /** Voice that generated this segment (Phase 9q). When book.voice_id is
+   * changed and differs from this, generate-voice auto-resets so the audio
+   * doesn't end up mid-book in two different voices. Undefined on segments
+   * generated before 9q — they get treated as the default narrator. */
+  voice_id?: string;
 }
 
 // ============================================================

@@ -5,11 +5,14 @@ import { adminAuth, adminDb } from "@/lib/firebase/admin";
 import { extractPdfFull, type PdfPage } from "@/lib/pdf-extract";
 import {
   buildParagraphSSML,
+  buildParagraphSSMLNoMarks,
+  buildParagraphPlainText,
   getProvider,
   type ParagraphForSSML,
   type Timepoint,
   type TTSProviderId,
 } from "@/lib/tts";
+import { getVoiceById } from "@/lib/voices";
 import type { VoiceSegment } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -219,13 +222,35 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
+  // Resolve the chosen narrator (Phase 9q). Falls back to the catalog default
+  // when book.voice_id is unset, which keeps every pre-9q book working
+  // unchanged. The voice's `mode` field drives all the downstream branching:
+  // synced → SSML with marks + timepoints; premium → no marks, no timepoints,
+  // and (for Chirp 3 HD) no SSML at all.
+  const chosenVoice = getVoiceById(book.voice_id as string | undefined);
+  const voiceMode = chosenVoice.mode;
+  const isPremium = voiceMode === "premium";
+  const isPlainText = chosenVoice.tier === "chirp3-hd"; // no SSML support
+
   // Determine where to resume from. If `reset` is true, wipe and start fresh.
   // Otherwise pick up from voice_segments.length (since segments are appended
   // 1:1 with their index in the page-group list).
-  const existing: VoiceSegment[] =
-    !body.reset && Array.isArray(book.voice_segments)
-      ? book.voice_segments
-      : [];
+  //
+  // AUTO-RESET on voice change (9q): if the existing segments were generated
+  // with a different voice than the currently-chosen one, mid-book voice
+  // switching would produce two-different-narrators audio. Detect that and
+  // force a reset so the user re-renders from segment 1 in the new voice.
+  // Segments before 9q have no `voice_id` stamped — we treat them as the
+  // catalog default for this comparison.
+  const existingPrior: VoiceSegment[] = Array.isArray(book.voice_segments)
+    ? book.voice_segments
+    : [];
+  const priorVoiceId =
+    existingPrior[0]?.voice_id ?? "en-US-Neural2-D"; // pre-9q default
+  const voiceChanged =
+    existingPrior.length > 0 && priorVoiceId !== chosenVoice.id;
+  const forceReset = body.reset === true || voiceChanged;
+  const existing: VoiceSegment[] = forceReset ? [] : existingPrior;
   const nextIndex = existing.length;
 
   // Extract PDF — but cache the result. For a 500-page book this used to
@@ -421,36 +446,47 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   let segChars = 0;
   const allTimepoints: Timepoint[] = [];
 
-  // Pack into batches whose SSML stays under maxCharsPerCall. We probe by
-  // building the SSML and checking length.
+  // Phase 9q — pick the input builder based on voice mode. Synced uses
+  // SSML with <mark> tags so we get timepoints; premium-Studio uses SSML
+  // without marks (Studio voices reject marks); premium-Chirp uses plain
+  // text (Chirp 3 HD rejects all SSML). All three return a string that the
+  // provider can consume — only the synthesize args differ below.
+  const buildBatchInput = (paragraphs: FlatParagraph[]): string => {
+    const cast = paragraphs as ParagraphForSSML[];
+    if (!isPremium) return buildParagraphSSML(cast);
+    if (isPlainText) return buildParagraphPlainText(cast);
+    return buildParagraphSSMLNoMarks(cast);
+  };
+
+  // Pack into batches whose payload stays under maxCharsPerCall. We probe by
+  // building the input and checking length.
   interface SsmlBatch {
     paragraphs: FlatParagraph[];
-    ssml: string;
+    input: string;
   }
   const batches: SsmlBatch[] = [];
   {
     let currentBatch: FlatParagraph[] = [];
     for (const p of flat) {
       const trial = [...currentBatch, p];
-      const ssml = buildParagraphSSML(trial as ParagraphForSSML[]);
+      const trialInput = buildBatchInput(trial);
       if (
-        ssml.length > provider.maxCharsPerCall &&
+        trialInput.length > provider.maxCharsPerCall &&
         currentBatch.length > 0
       ) {
         // Flush the previous batch and start a new one with this paragraph
         batches.push({
           paragraphs: currentBatch,
-          ssml: buildParagraphSSML(currentBatch as ParagraphForSSML[]),
+          input: buildBatchInput(currentBatch),
         });
         currentBatch = [p];
-      } else if (ssml.length > provider.maxCharsPerCall) {
-        // Single paragraph alone exceeds limit — synthesize it as plain text
-        // (no mark, so it won't appear in timepoints but the audio still gets
-        // produced; the next paragraph's mark will land correctly because
-        // batches are independent calls).
+      } else if (trialInput.length > provider.maxCharsPerCall) {
+        // Single paragraph alone exceeds limit — synthesize it standalone.
+        // For synced mode this still includes the mark; for premium it just
+        // synthesizes the text with whatever wrappers the builder applies.
         batches.push({
           paragraphs: [p],
-          ssml: buildParagraphSSML([p] as ParagraphForSSML[]),
+          input: buildBatchInput([p]),
         });
         currentBatch = [];
       } else {
@@ -460,23 +496,42 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (currentBatch.length > 0) {
       batches.push({
         paragraphs: currentBatch,
-        ssml: buildParagraphSSML(currentBatch as ParagraphForSSML[]),
+        input: buildBatchInput(currentBatch),
       });
     }
   }
 
   try {
     for (const batch of batches) {
-      const r = await provider.synthesize({ ssml: batch.ssml });
+      // Synced voices receive SSML and request timepoints; premium voices
+      // either receive SSML (Studio — no marks) or plain text (Chirp 3 HD),
+      // and skip timepointing entirely. The provider's synthesize call
+      // accepts both shapes — see src/lib/tts.ts.
+      const r = isPlainText
+        ? await provider.synthesize({
+            text: batch.input,
+            voiceId: chosenVoice.id,
+            languageCode: chosenVoice.languageCode,
+            requestTimepoints: false,
+          })
+        : await provider.synthesize({
+            ssml: batch.input,
+            voiceId: chosenVoice.id,
+            languageCode: chosenVoice.languageCode,
+            requestTimepoints: !isPremium,
+          });
       buffers.push(r.audio);
-      // CRITICAL: Each batch's timepoints are relative to ITS audio's start.
-      // To express them relative to the full combined segment audio, we
-      // offset by the cumulative duration of all PRIOR batches.
-      for (const tp of r.timepoints) {
-        allTimepoints.push({
-          markName: tp.markName,
-          time: tp.time + segDuration,
-        });
+      // Premium-mode batches return no timepoints — skip the offset bookkeeping.
+      if (!isPremium) {
+        // CRITICAL: Each batch's timepoints are relative to ITS audio's start.
+        // To express them relative to the full combined segment audio, we
+        // offset by the cumulative duration of all PRIOR batches.
+        for (const tp of r.timepoints) {
+          allTimepoints.push({
+            markName: tp.markName,
+            time: tp.time + segDuration,
+          });
+        }
       }
       segDuration += r.duration;
       segChars += r.chars;
@@ -600,8 +655,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     page_end: group.page_end,
     duration: realDuration,
     chars: segChars,
-    pages_paragraphs,
-    paragraph_timepoints: allTimepoints,
+    voice_id: chosenVoice.id,
+    // Premium-mode segments don't have per-paragraph timing or stored
+    // paragraph text — they play as audio-only. Skipping these fields saves
+    // ~75 KB per book and keeps the player from trying to display a highlight
+    // it can't track.
+    ...(isPremium
+      ? {}
+      : {
+          pages_paragraphs,
+          paragraph_timepoints: allTimepoints,
+        }),
   };
 
   const newProcessedCount = nextIndex + 1;
@@ -615,10 +679,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     voice_segments: FieldValue.arrayUnion(segment),
     voice_provider: providerId,
     voice_total_seconds: newTotalSeconds,
+    voice_id: chosenVoice.id, // pin the chosen voice on the book (9q)
+    voice_mode: voiceMode, // synced | premium (9q)
     updated_at: FieldValue.serverTimestamp(),
   };
-  // On reset, replace the array instead of appending
-  if (body.reset && existing.length === 0) {
+  // On reset (explicit user wipe OR auto-reset from voice change), replace
+  // the array instead of appending so the new voice's segment 1 lands cleanly.
+  if (forceReset && existing.length === 0) {
     update.voice_segments = [segment];
   }
   await bookRef.update(update);

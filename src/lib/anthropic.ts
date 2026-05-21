@@ -202,7 +202,7 @@ function buildUserPrompt(input: ClassifyInput): string {
 }
 
 /** Strip a leading ```json / trailing ``` if the model added them. */
-function stripFences(s: string): string {
+export function stripFences(s: string): string {
   return s
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
@@ -216,7 +216,7 @@ function stripFences(s: string): string {
  * routinely. We retry up to 5 times with backoff before giving up, which gets
  * a ~1-minute book through reliably.
  */
-async function callAnthropic(
+export async function callAnthropic(
   body: object,
   apiKey: string,
 ): Promise<Response> {
