@@ -656,20 +656,32 @@ function splitIntoSentences(text: string): string[] {
  *     marks from landing in the gap (where they may not fire)
  *
  * Heading paragraphs get extra treatment: a longer pre-break (600ms instead
- * of 350ms), wrapping in `<emphasis level="moderate">`, and a longer
- * post-break (500ms after) — so chapter headings sound like proper
- * announcements rather than just a louder body line.
+ * of 350ms), wrapping in `<emphasis level="moderate">` for providers that
+ * support it, and a longer post-break (500ms after) — so chapter headings
+ * sound like proper announcements rather than just a louder body line.
  *
  * Body paragraphs are split into sentences and wrapped in `<s>` tags, which
  * Google's docs recommend for better intonation and pacing across long
  * paragraphs. Short single-sentence paragraphs skip the wrapping (it would
  * be redundant noise in the SSML).
  *
+ * Phase 9s.2 — added skipEmphasis option. AWS Polly's Neural / Long-form /
+ * Generative engines all reject the `<emphasis>` tag per the official
+ * supported-tags table (https://docs.aws.amazon.com/polly/latest/dg/supportedtags.html):
+ * Polly responds with "Unsupported Neural feature" and the whole batch
+ * fails. When skipEmphasis is true the heading text is emitted without the
+ * emphasis wrapper — the longer pre/post breaks still set the heading
+ * apart audibly, just without the prosody envelope.
+ *
  * Returns the SSML string. Caller is responsible for keeping it under the
  * provider's maxCharsPerCall — caller should chunk paragraphs across calls
  * if needed.
  */
-export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
+export function buildParagraphSSML(
+  paragraphs: ParagraphForSSML[],
+  options: { skipEmphasis?: boolean } = {},
+): string {
+  const skipEmphasis = options.skipEmphasis ?? false;
   const parts: string[] = ["<speak>"];
   paragraphs.forEach((p, i) => {
     const txt = p.text.trim();
@@ -685,12 +697,17 @@ export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
     parts.push(`<mark name="${escapeSsmlText(p.markName)}"/>`);
 
     if (isHeading) {
-      // Headings: emphasis wrapper + post-break. Don't bother with sentence
-      // splitting — headings are short and benefit more from the unified
-      // emphasis envelope than from sentence-by-sentence prosody.
-      parts.push(
-        `<emphasis level="moderate">${escapeSsmlText(txt)}</emphasis>`,
-      );
+      // Headings: emphasis wrapper (when supported) + post-break. Don't
+      // bother with sentence splitting — headings are short and benefit
+      // more from the unified emphasis envelope than from sentence-by-
+      // sentence prosody.
+      if (skipEmphasis) {
+        parts.push(escapeSsmlText(txt));
+      } else {
+        parts.push(
+          `<emphasis level="moderate">${escapeSsmlText(txt)}</emphasis>`,
+        );
+      }
       parts.push('<break time="500ms"/>');
     } else {
       // Body paragraphs: wrap sentences in <s> when there are 2+ of them.
