@@ -90,8 +90,15 @@ function isMetadataParagraph(text: string): boolean {
  * markup; we keep paragraphs well under that so each one fits in a single
  * call regardless of batching. Paragraphs longer than this (rare — typically
  * only block-quoted Bible chapters or legal preambles) get split at sentence
- * boundaries into pseudo-paragraphs that share the same mark prefix. */
-const TTS_PARAGRAPH_CHAR_CAP = 3500;
+ * boundaries into pseudo-paragraphs that share the same mark prefix.
+ *
+ * The effective cap is provider-dependent: Google Neural2/News allow 5,000
+ * SSML chars per call so we use 3,500 there (with ~1,500 chars of markup
+ * headroom). AWS Polly Neural caps at 3,000 total chars and Generative at
+ * 2,000 plain chars, so we drop the cap to 1,500 for any Polly voice. See
+ * the call site in POST() — it picks the cap based on chosenVoice.provider. */
+const TTS_PARAGRAPH_CHAR_CAP_GOOGLE = 3500;
+const TTS_PARAGRAPH_CHAR_CAP_AWS = 1500;
 
 /**
  * Split a page's extracted text into FULL paragraph strings (no truncation).
@@ -118,30 +125,31 @@ function splitPageIntoParagraphs(rawPageText: string): string[] {
 
 /**
  * Split a single paragraph at sentence boundaries into chunks that each fit
- * under TTS_PARAGRAPH_CHAR_CAP. Used for the rare extra-long paragraph that
- * can't fit in one SSML request.
+ * under `maxChars`. Used for the rare extra-long paragraph that can't fit
+ * in one SSML request. The caller passes the per-provider cap so Polly
+ * (tighter limits) and Google (looser limits) each get appropriate chunking.
  *
  * Returns the original paragraph in a single-element array if it's already
  * under the cap.
  */
-function chunkLongParagraph(text: string): string[] {
-  if (text.length <= TTS_PARAGRAPH_CHAR_CAP) return [text];
+function chunkLongParagraph(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
   const sentences = text.split(/(?<=[.!?])\s+/);
   const chunks: string[] = [];
   let buf = "";
   for (const s of sentences) {
-    if (buf.length + s.length + 1 <= TTS_PARAGRAPH_CHAR_CAP) {
+    if (buf.length + s.length + 1 <= maxChars) {
       buf = buf ? `${buf} ${s}` : s;
     } else {
       if (buf) chunks.push(buf);
-      if (s.length <= TTS_PARAGRAPH_CHAR_CAP) {
+      if (s.length <= maxChars) {
         buf = s;
       } else {
         // Single sentence exceeds cap — last resort, break at nearest space
         let remaining = s;
-        while (remaining.length > TTS_PARAGRAPH_CHAR_CAP) {
-          let cut = remaining.lastIndexOf(" ", TTS_PARAGRAPH_CHAR_CAP);
-          if (cut === -1) cut = TTS_PARAGRAPH_CHAR_CAP;
+        while (remaining.length > maxChars) {
+          let cut = remaining.lastIndexOf(" ", maxChars);
+          if (cut === -1) cut = maxChars;
           chunks.push(remaining.slice(0, cut));
           remaining = remaining.slice(cut).trimStart();
         }
@@ -381,12 +389,19 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     text: string;
     markName: string;
   }
+  // Per-provider paragraph chunk cap. Polly's tighter 2,000-char request
+  // limit (for Generative) drives the lower 1,500 value here.
+  const paragraphChunkCap =
+    chosenVoice.provider === "aws"
+      ? TTS_PARAGRAPH_CHAR_CAP_AWS
+      : TTS_PARAGRAPH_CHAR_CAP_GOOGLE;
+
   const flat: FlatParagraph[] = [];
   for (const pg of group.pages) {
     const paragraphs = splitPageIntoParagraphs(pg.text);
     paragraphs.forEach((text, idx) => {
       if (!text.trim()) return;
-      const chunks = chunkLongParagraph(text);
+      const chunks = chunkLongParagraph(text, paragraphChunkCap);
       if (chunks.length === 1) {
         flat.push({
           page: pg.page,
