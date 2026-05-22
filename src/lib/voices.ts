@@ -48,6 +48,37 @@ export interface VoiceMeta {
 }
 
 /**
+ * Google Cloud TTS pricing per million characters as of May 2026. Drives
+ * the cost estimate in the regen confirmation modal (Phase 9q.2). Update
+ * if/when Google changes their published pricing.
+ *
+ * Source: https://cloud.google.com/text-to-speech/pricing
+ *
+ * Each tier has a free monthly quota (1M chars for Neural2/News/Studio,
+ * 4M for Standard, 1M for Chirp 3 HD). The modal mentions this in passing
+ * but doesn't try to track usage — we don't have visibility into the
+ * project's monthly counters, so the cost estimate shows the FULL price
+ * and the user can subtract the free tier mentally.
+ */
+export const PRICE_PER_MILLION_CHARS_USD: Record<VoiceTier, number> = {
+  neural2: 16,
+  news: 16,
+  wavenet: 16,
+  studio: 160,
+  "chirp3-hd": 30,
+};
+
+/** Per-tier monthly free-quota character count, for displaying alongside the
+ * cost estimate. Same source as the pricing constants above. */
+export const FREE_QUOTA_CHARS_PER_MONTH: Record<VoiceTier, number> = {
+  neural2: 1_000_000,
+  news: 1_000_000,
+  wavenet: 1_000_000,
+  studio: 1_000_000,
+  "chirp3-hd": 1_000_000,
+};
+
+/**
  * Curated narrator list. Twelve voices is the sweet spot — enough variety to
  * fit any book, few enough that the UI doesn't feel like a phone book. All
  * IDs verified against Google's voice list as of May 2026.
@@ -213,4 +244,39 @@ export function getVoicesByMode(mode: VoiceMode): VoiceMeta[] {
  * internal-only fields. */
 export function publicVoiceMeta(v: VoiceMeta): VoiceMeta {
   return v;
+}
+
+// ----------------------------------------------------------------------------
+// Cost estimation (Phase 9q.2 — billing-aware regen confirmation)
+// ----------------------------------------------------------------------------
+
+/**
+ * Estimated USD cost of synthesizing `chars` characters with the given voice.
+ * Pre-free-tier — does NOT subtract any monthly free quota, because we can't
+ * see the project's usage counter from this side. The caller's UI separately
+ * mentions the free tier so the user can do the mental math.
+ */
+export function estimateCostUSD(chars: number, voice: VoiceMeta): number {
+  if (chars <= 0) return 0;
+  const ratePerMillion = PRICE_PER_MILLION_CHARS_USD[voice.tier];
+  return (chars / 1_000_000) * ratePerMillion;
+}
+
+/** Format a USD amount for casual display. Whole dollars over $1, two
+ * decimals between $0.01-$1.00, and "<$0.01" for anything smaller. */
+export function formatUSD(amount: number): string {
+  if (amount <= 0) return "$0";
+  if (amount < 0.01) return "<$0.01";
+  if (amount < 1) return `$${amount.toFixed(2)}`;
+  if (amount < 10) return `$${amount.toFixed(2)}`;
+  if (amount < 100) return `$${amount.toFixed(0)}`;
+  return `$${Math.round(amount).toLocaleString()}`;
+}
+
+/** Format a character count compactly: 1,250,000 -> "1.3M", 4,200 -> "4.2K". */
+export function formatChars(chars: number): string {
+  if (chars >= 1_000_000) return `${(chars / 1_000_000).toFixed(1)}M`;
+  if (chars >= 10_000) return `${Math.round(chars / 1_000)}K`;
+  if (chars >= 1_000) return `${(chars / 1_000).toFixed(1)}K`;
+  return `${chars}`;
 }

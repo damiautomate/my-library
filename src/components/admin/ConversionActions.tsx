@@ -1,10 +1,18 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Loader2, BookOpenCheck, Headphones, CheckCircle2, X } from "lucide-react";
+import { Loader2, BookOpenCheck, Headphones, CheckCircle2, X, AlertTriangle } from "lucide-react";
 import { auth as firebaseAuth } from "@/lib/firebase/client";
 import type { Book } from "@/lib/types";
 import { NarratorPicker } from "./NarratorPicker";
+import {
+  getVoiceById,
+  estimateCostUSD,
+  formatChars,
+  formatUSD,
+  PRICE_PER_MILLION_CHARS_USD,
+  FREE_QUOTA_CHARS_PER_MONTH,
+} from "@/lib/voices";
 
 interface Props {
   book: Book;
@@ -33,6 +41,14 @@ export function ConversionActions({ book, onChanged }: Props) {
     total: number;
   } | null>(null);
   const cancelVoiceRef = useRef(false);
+
+  // Phase 9q.2 — billing-aware regen confirmation. When the user clicks
+  // "Generate voice" or "Re-generate", we don't kick off synthesis directly;
+  // instead we show an inline panel with the estimated character count and
+  // USD cost so they can see what they're committing before any money is
+  // spent. After Google billing was enabled in 9q.1, a careless regen can
+  // burn $20+ on a 500-page book — this is the guard against accidental ones.
+  const [showRegenConfirm, setShowRegenConfirm] = useState(false);
 
   async function authHeader(): Promise<string> {
     const u = firebaseAuth.currentUser;
@@ -76,14 +92,11 @@ export function ConversionActions({ book, onChanged }: Props) {
 
   async function generateVoice() {
     const reset = hasVoice;
-    if (
-      !confirm(
-        reset
-          ? "Voice audio already exists. Re-generating from scratch will replace it. Continue?"
-          : "Generate voice audio for this book? Uses Google TTS. Processes one ~10-page segment per HTTP call — you can leave this page open and it'll keep going. For a 300-page book expect ~30 segments at ~30-60s each.",
-      )
-    )
-      return;
+    // The native confirm() that used to live here was replaced by an inline
+    // cost-aware confirmation panel (Phase 9q.2 — see the regen confirm
+    // panel rendered below). By the time generateVoice() runs, the user has
+    // already seen the estimated character count and USD cost and clicked
+    // "Confirm and regenerate", so we proceed directly.
     setVoiceBusy(true);
     setVoiceResult(null);
     setVoiceErr(null);
@@ -279,8 +292,19 @@ export function ConversionActions({ book, onChanged }: Props) {
         </div>
         <button
           type="button"
-          onClick={voiceBusy ? cancelVoice : generateVoice}
-          disabled={false}
+          onClick={
+            voiceBusy
+              ? cancelVoice
+              : () => {
+                  // 9q.2 — show the cost-aware confirmation panel instead of
+                  // running generateVoice immediately. The panel's confirm
+                  // button is what actually kicks off synthesis.
+                  setVoiceErr(null);
+                  setVoiceResult(null);
+                  setShowRegenConfirm(true);
+                }
+          }
+          disabled={showRegenConfirm}
           className={
             "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-xs disabled:opacity-50 " +
             (voiceBusy
@@ -300,6 +324,20 @@ export function ConversionActions({ book, onChanged }: Props) {
           )}
         </button>
       </div>
+
+      {/* Cost-aware regen confirmation panel (9q.2). Estimates character
+       * count from either the existing segments (precise) or page_count
+       * (fallback), then multiplies by the voice's per-million-char rate. */}
+      {showRegenConfirm && !voiceBusy && (
+        <RegenConfirmPanel
+          book={book}
+          onCancel={() => setShowRegenConfirm(false)}
+          onConfirm={() => {
+            setShowRegenConfirm(false);
+            void generateVoice();
+          }}
+        />
+      )}
       {voiceProgress && (
         <div className="mt-3">
           <div className="mb-1 flex items-center justify-between font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-600">
@@ -339,5 +377,175 @@ export function ConversionActions({ book, onChanged }: Props) {
         <p className="mt-2 text-xs text-oxblood-700">{voiceErr}</p>
       )}
     </section>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Regen confirmation panel — billing-aware (Phase 9q.2)
+// ----------------------------------------------------------------------------
+
+/**
+ * Estimate the number of characters Google TTS will be asked to synthesize
+ * for this book. Two paths, in order of accuracy:
+ *
+ *   1. If the book has existing voice_segments, sum their .chars — this is
+ *      the EXACT count from the prior regen and is what a fresh re-gen with
+ *      the same content will use again.
+ *   2. Otherwise estimate from page_count × ~2,500 chars/page, which is a
+ *      typical density for non-fiction body text. Returns 0 if page_count
+ *      isn't set, in which case the modal shows "unknown".
+ */
+function estimateBookChars(book: Book): {
+  chars: number;
+  basis: "previous" | "pages" | "unknown";
+} {
+  const segs = book.voice_segments;
+  if (Array.isArray(segs) && segs.length > 0) {
+    const sum = segs.reduce((s, x) => s + (x.chars ?? 0), 0);
+    if (sum > 0) return { chars: sum, basis: "previous" };
+  }
+  const pages = book.page_count ?? 0;
+  if (pages > 0) return { chars: pages * 2500, basis: "pages" };
+  return { chars: 0, basis: "unknown" };
+}
+
+interface RegenConfirmPanelProps {
+  book: Book;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function RegenConfirmPanel({
+  book,
+  onCancel,
+  onConfirm,
+}: RegenConfirmPanelProps) {
+  const hasVoice =
+    Array.isArray(book.voice_segments) && book.voice_segments.length > 0;
+  const voice = getVoiceById(book.voice_id);
+  const { chars, basis } = estimateBookChars(book);
+  const cost = estimateCostUSD(chars, voice);
+  const freeQuota = FREE_QUOTA_CHARS_PER_MONTH[voice.tier];
+  const rate = PRICE_PER_MILLION_CHARS_USD[voice.tier];
+
+  const basisLabel: Record<typeof basis, string> = {
+    previous: "from the existing audio",
+    pages: `~${book.page_count} pages × 2,500 chars/page`,
+    unknown: "no page count on file — will be computed on the first call",
+  };
+
+  return (
+    <div className="mt-3 rounded-sm border border-oxblood-200 bg-oxblood-50/40 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-oxblood-700">
+          Confirm regeneration
+        </p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-ink-500 hover:text-ink-700"
+          aria-label="Cancel"
+        >
+          <X size={13} />
+        </button>
+      </div>
+
+      <dl className="space-y-1.5 text-xs text-ink-800">
+        <ConfirmRow label="Narrator">
+          <span className="font-display text-sm text-ink-900">
+            {voice.displayName}
+          </span>{" "}
+          <span className="text-ink-500">
+            ({voice.id} — {voice.tier})
+          </span>
+        </ConfirmRow>
+        <ConfirmRow label="Estimated content">
+          {chars > 0 ? (
+            <>
+              ~{formatChars(chars)} characters{" "}
+              <span className="text-ink-500">({basisLabel[basis]})</span>
+            </>
+          ) : (
+            <span className="text-ink-500">{basisLabel[basis]}</span>
+          )}
+        </ConfirmRow>
+        <ConfirmRow label="Estimated cost">
+          {chars > 0 ? (
+            <>
+              <span className="font-display text-sm text-ink-900">
+                ~{formatUSD(cost)}
+              </span>{" "}
+              <span className="text-ink-500">
+                at ${rate}/M chars for {voice.tier} voices
+              </span>
+            </>
+          ) : (
+            <span className="text-ink-500">unknown</span>
+          )}
+        </ConfirmRow>
+      </dl>
+
+      <p className="mt-3 text-[0.6rem] text-ink-500">
+        Google&apos;s first {formatChars(freeQuota)} characters per month are
+        free across the {voice.tier} tier. The estimate above is gross — your
+        first regen each month effectively costs less.
+      </p>
+
+      {voice.mode === "premium" && (
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-700">
+          <AlertTriangle
+            size={12}
+            className="mt-0.5 flex-shrink-0 text-oxblood-700"
+          />
+          Premium voices cost {rate}× the standard tier and don&apos;t support
+          live paragraph highlight while the audio plays.
+        </p>
+      )}
+
+      {hasVoice && (
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-700">
+          <AlertTriangle
+            size={12}
+            className="mt-0.5 flex-shrink-0 text-oxblood-700"
+          />
+          This will replace the existing voice audio for this book.
+        </p>
+      )}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/30 bg-parchment-50 px-3 py-1.5 text-xs text-ink-700 hover:bg-parchment-100"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={onConfirm}
+          className="inline-flex items-center gap-1.5 rounded-sm border border-oxblood-700 bg-oxblood-700 px-3 py-1.5 text-xs text-parchment-50 hover:bg-oxblood-800"
+        >
+          <Headphones size={12} />
+          Confirm and regenerate
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
+      <dt className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500 sm:w-40 sm:flex-shrink-0">
+        {label}
+      </dt>
+      <dd className="flex-1 text-ink-800">{children}</dd>
+    </div>
   );
 }

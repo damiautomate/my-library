@@ -104,21 +104,39 @@ export function NarratorPicker({
     }
     audioRef.current?.pause();
     setPreviewLoadingId(voice.id);
+    setSaveError(null);
     try {
+      // Pre-flight fetch the sample route BEFORE handing the URL to <audio>.
+      // The route returns 302 -> Cloudinary on success (which fetch follows
+      // transparently, giving us the MP3) or JSON 5xx on failure (e.g.
+      // Google TTS billing not enabled). Without this pre-check, every
+      // failure mode reaches the audio element as a generic "no supported
+      // source" message, which is unhelpful — especially because the most
+      // common failure (Google billing) has a long, specific error message
+      // the user actually needs to see.
+      const r = await fetch(`/api/voice-samples/${voice.id}`);
+      if (!r.ok) {
+        const data = (await r.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? `Preview failed (HTTP ${r.status})`);
+      }
+      // r.url here is the post-redirect Cloudinary URL — the MP3 itself.
       const audio = audioRef.current ?? new Audio();
       audioRef.current = audio;
-      audio.src = `/api/voice-samples/${voice.id}`;
+      audio.src = r.url;
       audio.onended = () => setPreviewingId(null);
+      audio.onerror = () =>
+        setSaveError("Preview failed: browser couldn't play the audio file.");
       audio.onpause = () => {
         // Only clear previewingId if pause wasn't caused by switching tracks
-        if (audioRef.current?.src.endsWith(voice.id)) setPreviewingId(null);
+        if (audioRef.current?.src === r.url) setPreviewingId(null);
       };
       await audio.play();
       setPreviewingId(voice.id);
     } catch (err) {
-      // Often a 502 if the synthesis itself failed (rare) — surface gently.
       const msg = err instanceof Error ? err.message : String(err);
-      setSaveError(`Preview failed: ${msg.slice(0, 80)}`);
+      // Show enough of the message to be useful — Google's billing message
+      // is ~300 chars including the project URL the user needs to visit.
+      setSaveError(`Preview failed: ${msg.slice(0, 300)}`);
     } finally {
       setPreviewLoadingId(null);
     }
