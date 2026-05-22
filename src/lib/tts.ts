@@ -15,7 +15,7 @@ import "server-only";
  * Reference: https://cloud.google.com/text-to-speech/docs/reference/rest/v1beta1/text/synthesize
  */
 
-export type TTSProviderId = "google" | "elevenlabs";
+export type TTSProviderId = "google" | "aws" | "elevenlabs";
 
 export interface Timepoint {
   /** Name from the `<mark name="X"/>` tag in the input SSML. */
@@ -296,6 +296,212 @@ class GoogleProvider implements TTSProvider {
 }
 
 // ----------------------------------------------------------------------------
+// AWS Polly (Phase 9s)
+// ----------------------------------------------------------------------------
+//
+// Polly is our alternative provider — useful when Google has an outage, when
+// the project hits a Google quota wall, or when a specific Polly voice fits
+// a book better than any Google option. Existing books on Google keep working
+// untouched: the route picks the provider from the selected voice's catalog
+// entry, so swapping providers is a per-book voice choice.
+//
+// Differences from Google's API to be aware of:
+//
+//  1. Polly's mark timepoints come from a SEPARATE call. Google returns audio
+//     and timepoints in one response; Polly requires two synthesizeSpeech
+//     calls per batch — one with OutputFormat="mp3", one with
+//     OutputFormat="json" + SpeechMarkTypes=["ssml"]. The cost is 2x calls
+//     per batch (small absolute cost — calls are fast) but you pay for the
+//     synthesis characters only once.
+//
+//  2. Polly returns mark times in MILLISECONDS; we normalize to seconds to
+//     match the SynthesizeResult contract.
+//
+//  3. Polly's neural engine supports SSML including <mark>, <emphasis>,
+//     <break>, <s>, and <say-as>. Generative & long-form voices don't
+//     support marks — those map to "premium" mode in our catalog.
+
+class AwsPollyProvider implements TTSProvider {
+  id: TTSProviderId = "aws";
+  // Polly neural accepts up to 3000 billed characters (text) or 6000 raw
+  // characters (SSML including markup) per request. We use 5000 as a safe
+  // cap with headroom for SSML overhead.
+  maxCharsPerCall = 5000;
+  supportsTimepoints = true;
+
+  async synthesize(input: SynthesizeInput): Promise<SynthesizeResult> {
+    // Lazy import so the AWS SDK only loads when someone actually uses it.
+    // The SDK is ~5MB unzipped — keeping it out of the Google-only hot path
+    // matters for serverless cold starts on routes that never touch AWS.
+    const { PollyClient, SynthesizeSpeechCommand } = await import(
+      "@aws-sdk/client-polly"
+    );
+    type PollyVoiceId = NonNullable<
+      ConstructorParameters<typeof SynthesizeSpeechCommand>[0]["VoiceId"]
+    >;
+
+    const region = process.env.AWS_REGION ?? "us-east-1";
+    const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+    const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+    if (!accessKeyId || !secretAccessKey) {
+      throw new Error(
+        "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set. Add them to Vercel environment variables, then redeploy.",
+      );
+    }
+
+    const client = new PollyClient({
+      region,
+      credentials: { accessKeyId, secretAccessKey },
+    });
+
+    const voiceName = input.voiceId ?? "Joanna";
+    const requestTimepoints = input.requestTimepoints ?? true;
+
+    // Polly uses a per-voice engine flag rather than encoding the engine in
+    // the voice name like Google does. Default to "neural" — our catalog
+    // entries override with "generative" / "long-form" when needed via
+    // a separate field passed from the route. For now we infer from the
+    // voice name's suffix convention used in voices.ts.
+    const engine = inferPollyEngine(voiceName);
+
+    const inputType: "text" | "ssml" = input.ssml ? "ssml" : "text";
+    const inputContent = input.ssml ?? input.text ?? "";
+    const sourceLen = inputContent.length;
+
+    // --- Audio call ---
+    const audioCmd = new SynthesizeSpeechCommand({
+      Text: inputContent,
+      TextType: inputType,
+      OutputFormat: "mp3",
+      VoiceId: stripPollyEngineSuffix(voiceName) as PollyVoiceId,
+      Engine: engine,
+      // Polly chooses sample rate automatically per engine; explicit override
+      // not needed for our use case.
+    });
+    const audioResp = await client.send(audioCmd);
+    if (!audioResp.AudioStream) {
+      throw new Error("Polly returned no audio stream");
+    }
+    const audio = await streamToBuffer(audioResp.AudioStream);
+
+    // --- Timepoint call (only when requested AND engine supports marks) ---
+    let timepoints: Timepoint[] = [];
+    if (requestTimepoints && engine !== "generative" && input.ssml) {
+      const marksCmd = new SynthesizeSpeechCommand({
+        Text: inputContent,
+        TextType: inputType,
+        OutputFormat: "json",
+        SpeechMarkTypes: ["ssml"],
+        VoiceId: stripPollyEngineSuffix(voiceName) as PollyVoiceId,
+        Engine: engine,
+      });
+      const marksResp = await client.send(marksCmd);
+      if (marksResp.AudioStream) {
+        const marksRaw = await streamToString(marksResp.AudioStream);
+        // Polly returns JSON-lines: one JSON object per line. Filter to ssml
+        // marks (we set SpeechMarkTypes to ssml only, but be defensive).
+        timepoints = marksRaw
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line) as {
+                time: number;
+                type: string;
+                value: string;
+              };
+            } catch {
+              return null;
+            }
+          })
+          .filter(
+            (m): m is { time: number; type: string; value: string } =>
+              m !== null && m.type === "ssml",
+          )
+          .map((m) => ({
+            markName: m.value,
+            // Polly returns ms; the SynthesizeResult contract is seconds.
+            time: m.time / 1000,
+          }));
+      }
+    }
+
+    // Duration via the same frame parser we use for Google. Polly's MP3
+    // output is also CBR / consistent enough that frame-walking gives
+    // accurate per-batch durations — critical for the cross-batch offset
+    // bookkeeping in generate-voice (see Phase 9n background).
+    const framed = mp3FrameDuration(audio);
+    const duration = framed > 0 ? framed : estimateMp3DurationByBytes(audio.length);
+
+    return {
+      audio,
+      duration,
+      chars: sourceLen,
+      timepoints,
+    };
+  }
+}
+
+/**
+ * Polly's engine parameter ("standard" / "neural" / "long-form" / "generative")
+ * is independent of the voice name in the AWS API. Our catalog encodes the
+ * engine in the voice ID using suffixes like "Joanna-Neural" or
+ * "Danielle-Generative" so we can keep one flat `voice_id` field on the book
+ * doc. This helper extracts the engine from that suffix.
+ *
+ * Unsuffixed voice IDs default to neural (the modern default and what most
+ * Polly users want).
+ */
+function inferPollyEngine(
+  voiceName: string,
+): "standard" | "neural" | "long-form" | "generative" {
+  const v = voiceName.toLowerCase();
+  if (v.endsWith("-generative")) return "generative";
+  if (v.endsWith("-long-form")) return "long-form";
+  if (v.endsWith("-standard")) return "standard";
+  return "neural";
+}
+
+/** Strip the engine suffix added by our catalog convention before sending to
+ * the Polly API, which expects bare voice names ("Joanna", not "Joanna-Neural"). */
+function stripPollyEngineSuffix(voiceName: string): string {
+  return voiceName.replace(/-(generative|long-form|standard|neural)$/i, "");
+}
+
+/** Convert a Polly AudioStream (which is an SDK stream type) to a Buffer.
+ * Works with both the modern stream interface and the legacy uint8array
+ * fallback path some runtimes use. */
+async function streamToBuffer(stream: unknown): Promise<Buffer> {
+  // AWS SDK v3 streams expose .transformToByteArray() in Node 18+.
+  if (
+    typeof stream === "object" &&
+    stream !== null &&
+    "transformToByteArray" in stream &&
+    typeof (stream as { transformToByteArray: () => Promise<Uint8Array> })
+      .transformToByteArray === "function"
+  ) {
+    const bytes = await (
+      stream as { transformToByteArray: () => Promise<Uint8Array> }
+    ).transformToByteArray();
+    return Buffer.from(bytes);
+  }
+  // Fallback: iterate as async iterable (Node Readable stream)
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream as AsyncIterable<Uint8Array>) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Convert a Polly AudioStream to a UTF-8 string — used for the JSON-lines
+ * mark response. */
+async function streamToString(stream: unknown): Promise<string> {
+  const buf = await streamToBuffer(stream);
+  return buf.toString("utf-8");
+}
+
+// ----------------------------------------------------------------------------
 // ElevenLabs — stubbed
 // ----------------------------------------------------------------------------
 
@@ -322,6 +528,8 @@ export function getProvider(id: TTSProviderId): TTSProvider {
   switch (id) {
     case "google":
       return new GoogleProvider();
+    case "aws":
+      return new AwsPollyProvider();
     case "elevenlabs":
       return new ElevenLabsProvider();
     default: {
@@ -357,31 +565,135 @@ export interface ParagraphForSSML {
 }
 
 /**
- * Build an SSML string with a `<mark>` before each paragraph. The marks
- * generate timepoints in the response that we use for precise paragraph-level
- * sync. We follow Google's published guidance:
+ * Detect whether a paragraph looks like a heading.
+ *
+ * Combined heuristic with three independent signals — any one triggers:
+ *   1. Starts with a structural keyword (chapter/part/section/etc) and
+ *      doesn't end with sentence-ending punctuation. Catches "Chapter 5",
+ *      "Part Two: The Reckoning", "Introduction" etc.
+ *   2. All-caps multi-word phrase. Catches "WHY WE FAIL" / "THE BEGINNING".
+ *      Single-word all-caps is excluded — too often stylistic emphasis
+ *      ("NEVER give up") rather than a true heading.
+ *   3. Short (<= 80 chars), starts with a capital letter, doesn't end with
+ *      sentence-ending punctuation. Catches subheadings like "Why now".
+ *
+ * Length cap at 120 chars rules out actual sentences that happen to lack a
+ * period (extraction artifacts on the last line of a page, etc.).
+ *
+ * Trade-off chosen: false positives are mostly harmless — adding mild
+ * emphasis + a longer pause to a body paragraph sounds slightly more
+ * deliberate, not wrong. False negatives leave headings flat. So we err
+ * on the side of detecting more rather than less.
+ */
+function looksLikeHeading(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > 120) return false;
+  const endsWithSentence = /[.!?;:,]$/.test(t);
+
+  // Signal 1: structural keyword
+  if (
+    /^(chapter|part|section|appendix|book|prologue|epilogue|introduction|conclusion|preface|foreword|afterword)\b/i.test(
+      t,
+    ) &&
+    !endsWithSentence
+  ) {
+    return true;
+  }
+
+  // Signal 2: all-caps multi-word
+  // Allow letters, apostrophes, hyphens, ampersands, digits, spaces.
+  // Require 2+ words and first+last char to be uppercase letters.
+  if (
+    /^[A-Z][A-Z0-9'\-&\s]+[A-Z0-9]$/.test(t) &&
+    t.split(/\s+/).length >= 2
+  ) {
+    return true;
+  }
+
+  // Signal 3: short, capital-led, not a sentence
+  if (t.length <= 80 && !endsWithSentence && /^[A-Z]/.test(t)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Split a paragraph into sentences for `<s>` wrapping. Sentence boundary
+ * is "punctuation followed by whitespace and a capital letter", which is
+ * good enough for prose. Doesn't try to handle abbreviations ("Dr. Smith"
+ * would over-split) — Google's voices are tolerant of an extra <s>, and
+ * the prosody gain on correctly-split sentences outweighs the rare
+ * over-split.
+ */
+function splitIntoSentences(text: string): string[] {
+  const t = text.trim();
+  if (!t) return [];
+  const parts = t.split(/(?<=[.!?])\s+(?=[A-Z"'])/);
+  return parts.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Build an SSML string with a `<mark>` before each paragraph (Phase 9s
+ * upgrade — heading-aware prosody and sentence wrapping). The marks
+ * generate timepoints in the response that we use for precise
+ * paragraph-level sync. We follow Google's published guidance:
  *
  *   - One mark per paragraph (NOT consecutive marks)
  *   - Each mark followed by actual speech text (no audio-less gaps)
  *   - A short <break> between paragraphs to give natural pause and prevent
  *     marks from landing in the gap (where they may not fire)
  *
+ * Heading paragraphs get extra treatment: a longer pre-break (600ms instead
+ * of 350ms), wrapping in `<emphasis level="moderate">`, and a longer
+ * post-break (500ms after) — so chapter headings sound like proper
+ * announcements rather than just a louder body line.
+ *
+ * Body paragraphs are split into sentences and wrapped in `<s>` tags, which
+ * Google's docs recommend for better intonation and pacing across long
+ * paragraphs. Short single-sentence paragraphs skip the wrapping (it would
+ * be redundant noise in the SSML).
+ *
  * Returns the SSML string. Caller is responsible for keeping it under the
  * provider's maxCharsPerCall — caller should chunk paragraphs across calls
  * if needed.
  */
 export function buildParagraphSSML(paragraphs: ParagraphForSSML[]): string {
-  const parts: string[] = ['<speak>'];
+  const parts: string[] = ["<speak>"];
   paragraphs.forEach((p, i) => {
     const txt = p.text.trim();
     if (!txt) return;
+    const isHeading = looksLikeHeading(txt);
+
+    // Inter-paragraph break. Headings get a longer pre-break so they feel
+    // set apart from preceding body text.
     if (i > 0) {
-      // Small pause between paragraphs — feels natural and ensures the next
-      // mark lands on actual speech, not silence.
-      parts.push('<break time="350ms"/>');
+      parts.push(isHeading ? '<break time="600ms"/>' : '<break time="350ms"/>');
     }
+
     parts.push(`<mark name="${escapeSsmlText(p.markName)}"/>`);
-    parts.push(escapeSsmlText(txt));
+
+    if (isHeading) {
+      // Headings: emphasis wrapper + post-break. Don't bother with sentence
+      // splitting — headings are short and benefit more from the unified
+      // emphasis envelope than from sentence-by-sentence prosody.
+      parts.push(
+        `<emphasis level="moderate">${escapeSsmlText(txt)}</emphasis>`,
+      );
+      parts.push('<break time="500ms"/>');
+    } else {
+      // Body paragraphs: wrap sentences in <s> when there are 2+ of them.
+      // Single-sentence paragraphs skip the wrap (it's redundant — the
+      // surrounding <break> tags already mark the boundary).
+      const sentences = splitIntoSentences(txt);
+      if (sentences.length >= 2) {
+        for (const s of sentences) {
+          parts.push(`<s>${escapeSsmlText(s)}</s>`);
+        }
+      } else {
+        parts.push(escapeSsmlText(txt));
+      }
+    }
   });
   parts.push("</speak>");
   return parts.join("");

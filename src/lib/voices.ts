@@ -22,19 +22,33 @@
  * The `tier` and `mode` fields drive the SSML build path in tts.ts.
  */
 
-export type VoiceTier = "neural2" | "news" | "wavenet" | "studio" | "chirp3-hd";
+export type VoiceTier =
+  | "neural2"
+  | "news"
+  | "wavenet"
+  | "studio"
+  | "chirp3-hd"
+  | "polly-neural"
+  | "polly-long-form"
+  | "polly-generative";
 export type VoiceMode = "synced" | "premium";
 export type VoiceGender = "female" | "male";
+/** Which TTS provider this voice runs on. Drives which API the
+ * generate-voice route calls and which credentials env vars are required. */
+export type VoiceProvider = "google" | "aws";
 
 export interface VoiceMeta {
-  /** Exact Google TTS voice name. */
+  /** Exact provider voice name. For Google: the canonical Google TTS name
+   * ("en-US-Neural2-D"). For AWS Polly: the bare voice name with an engine
+   * suffix our adapter strips ("Joanna-Neural", "Danielle-Generative"). */
   id: string;
   /** Friendly first name shown in the UI. */
   displayName: string;
   gender: VoiceGender;
   /** Accent label shown as a small badge — "American", "British", "Australian". */
   accent: string;
-  /** Language code passed to Google TTS (e.g. "en-US", "en-GB", "en-AU"). */
+  /** Language code passed to the TTS API. Google needs this; Polly infers
+   * it from the voice name but we keep the field for UI display. */
   languageCode: string;
   /** One-line tone description shown under the name. */
   description: string;
@@ -42,23 +56,29 @@ export interface VoiceMeta {
   tier: VoiceTier;
   /** "synced" supports highlight; "premium" does not. */
   mode: VoiceMode;
+  /** TTS backend that serves this voice (Phase 9s). Defaults to "google" on
+   * existing entries to preserve backward compat. */
+  provider: VoiceProvider;
   /** Tags the AI suggester uses to match voices to books. Examples:
    *  ["faith", "memoir", "warm"], ["business", "authoritative"]. */
   bestFor: string[];
 }
 
 /**
- * Google Cloud TTS pricing per million characters as of May 2026. Drives
- * the cost estimate in the regen confirmation modal (Phase 9q.2). Update
- * if/when Google changes their published pricing.
+ * TTS pricing per million characters as of May 2026. Drives the cost
+ * estimate in the regen confirmation modal (Phase 9q.2). Update if/when
+ * either provider changes their published pricing.
  *
- * Source: https://cloud.google.com/text-to-speech/pricing
+ * Sources:
+ *  - https://cloud.google.com/text-to-speech/pricing
+ *  - https://aws.amazon.com/polly/pricing/
  *
- * Each tier has a free monthly quota (1M chars for Neural2/News/Studio,
- * 4M for Standard, 1M for Chirp 3 HD). The modal mentions this in passing
- * but doesn't try to track usage — we don't have visibility into the
- * project's monthly counters, so the cost estimate shows the FULL price
- * and the user can subtract the free tier mentally.
+ * Each tier has a free monthly quota (Google: 1M chars Neural2/News/Studio,
+ * Polly: 5M chars Standard, 1M Neural for 12 months then ~$4/M, generative
+ * has no free tier). The modal mentions this in passing but doesn't try to
+ * track usage — we don't have visibility into either project's monthly
+ * counters, so the estimate shows the FULL price and the user does the
+ * mental math.
  */
 export const PRICE_PER_MILLION_CHARS_USD: Record<VoiceTier, number> = {
   neural2: 16,
@@ -66,16 +86,22 @@ export const PRICE_PER_MILLION_CHARS_USD: Record<VoiceTier, number> = {
   wavenet: 16,
   studio: 160,
   "chirp3-hd": 30,
+  "polly-neural": 16,
+  "polly-long-form": 100,
+  "polly-generative": 30,
 };
 
 /** Per-tier monthly free-quota character count, for displaying alongside the
- * cost estimate. Same source as the pricing constants above. */
+ * cost estimate. Same sources as the pricing constants above. */
 export const FREE_QUOTA_CHARS_PER_MONTH: Record<VoiceTier, number> = {
   neural2: 1_000_000,
   news: 1_000_000,
   wavenet: 1_000_000,
   studio: 1_000_000,
   "chirp3-hd": 1_000_000,
+  "polly-neural": 1_000_000,
+  "polly-long-form": 500_000,
+  "polly-generative": 100_000,
 };
 
 /**
@@ -94,6 +120,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Warm, conversational. The friendly default for most non-fiction.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["non-fiction", "personal-development", "memoir", "general"],
   },
   {
@@ -105,6 +132,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Deep, measured. Suits business, philosophy, and weighty subjects.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["business", "finance", "philosophy", "history", "authoritative"],
   },
   {
@@ -116,6 +144,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Calm, contemplative. Good for reflective and instructional writing.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["spirituality", "instructional", "academic", "calm"],
   },
   {
@@ -127,6 +156,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Warm, gentle. A natural fit for devotional and reflective books.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["faith", "spirituality", "memoir", "self-help", "warm"],
   },
   {
@@ -138,6 +168,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Clear and articulate. Fits academic, career, and how-to books.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["academic", "career", "instructional", "how-to"],
   },
   {
@@ -149,6 +180,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Neutral, professional. The all-purpose female counterpart to David.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["non-fiction", "general", "neutral"],
   },
   {
@@ -160,6 +192,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Authoritative broadcast tone. Strong for current affairs and journalism.",
     tier: "news",
     mode: "synced",
+    provider: "google",
     bestFor: ["current-affairs", "biography", "investigative", "non-fiction"],
   },
   {
@@ -171,6 +204,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Polished broadcast delivery. Suits non-fiction with a journalistic feel.",
     tier: "news",
     mode: "synced",
+    provider: "google",
     bestFor: ["non-fiction", "biography", "current-affairs"],
   },
   {
@@ -182,6 +216,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Refined British male. Lends gravitas to literature and classics.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["literature", "classics", "history", "british"],
   },
   {
@@ -193,6 +228,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
     description: "Articulate British female. Fits literary memoir and thoughtful fiction.",
     tier: "neural2",
     mode: "synced",
+    provider: "google",
     bestFor: ["literature", "memoir", "fiction", "british"],
   },
 
@@ -207,6 +243,7 @@ export const VOICE_CATALOG: VoiceMeta[] = [
       "Studio-grade narrator. Google's reference voice for audiobook quality. No live highlight.",
     tier: "studio",
     mode: "premium",
+    provider: "google",
     bestFor: ["fiction", "literary", "premium", "narrative-non-fiction"],
   },
   {
@@ -219,7 +256,110 @@ export const VOICE_CATALOG: VoiceMeta[] = [
       "Studio-grade narrator male. Cinematic delivery for narrative fiction. No live highlight.",
     tier: "studio",
     mode: "premium",
+    provider: "google",
     bestFor: ["fiction", "biography", "narrative-non-fiction", "premium"],
+  },
+
+  // ---- AWS Polly — Neural (synced, same price as Google Neural2) ----
+  {
+    id: "Joanna-Neural",
+    displayName: "Joanna",
+    gender: "female",
+    accent: "American",
+    languageCode: "en-US",
+    description: "Natural conversational female. Polly's flagship voice.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["non-fiction", "personal-development", "memoir", "warm"],
+  },
+  {
+    id: "Matthew-Neural",
+    displayName: "Matthew",
+    gender: "male",
+    accent: "American",
+    languageCode: "en-US",
+    description: "Confident, casual male. Strong for business and tech writing.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["business", "tech", "non-fiction", "career"],
+  },
+  {
+    id: "Ruth-Neural",
+    displayName: "Ruth",
+    gender: "female",
+    accent: "American",
+    languageCode: "en-US",
+    description: "Warm, articulate female. Great alternative for memoir and reflection.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["memoir", "spirituality", "reflection", "warm"],
+  },
+  {
+    id: "Stephen-Neural",
+    displayName: "Stephen",
+    gender: "male",
+    accent: "American",
+    languageCode: "en-US",
+    description: "Calm, measured male. Suits philosophy and instructional books.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["philosophy", "instructional", "academic", "calm"],
+  },
+  {
+    id: "Amy-Neural",
+    displayName: "Amy",
+    gender: "female",
+    accent: "British",
+    languageCode: "en-GB",
+    description: "Refined British female. Polly's literary-quality counterpart to Charlotte.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["literature", "memoir", "fiction", "british"],
+  },
+  {
+    id: "Brian-Neural",
+    displayName: "Brian",
+    gender: "male",
+    accent: "British",
+    languageCode: "en-GB",
+    description: "Distinguished British male. Polly's literary counterpart to Benedict.",
+    tier: "polly-neural",
+    mode: "synced",
+    provider: "aws",
+    bestFor: ["literature", "classics", "history", "british"],
+  },
+
+  // ---- AWS Polly — Generative (premium, no highlight) ----
+  {
+    id: "Danielle-Generative",
+    displayName: "Danielle",
+    gender: "female",
+    accent: "American",
+    languageCode: "en-US",
+    description:
+      "Generative voice — lifelike female with emotional nuance. No live highlight.",
+    tier: "polly-generative",
+    mode: "premium",
+    provider: "aws",
+    bestFor: ["fiction", "narrative-non-fiction", "memoir", "premium"],
+  },
+  {
+    id: "Matthew-Generative",
+    displayName: "Matthew (Gen)",
+    gender: "male",
+    accent: "American",
+    languageCode: "en-US",
+    description:
+      "Generative voice — lifelike male, expressive range. No live highlight.",
+    tier: "polly-generative",
+    mode: "premium",
+    provider: "aws",
+    bestFor: ["fiction", "biography", "modern", "premium"],
   },
 ];
 

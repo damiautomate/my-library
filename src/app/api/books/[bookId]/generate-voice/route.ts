@@ -193,7 +193,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   } catch {
     // body is optional
   }
-  const providerId: TTSProviderId = body.provider ?? "google";
 
   const bookId = params.bookId;
   if (!bookId)
@@ -211,6 +210,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       { status: 400 },
     );
 
+  // Resolve the chosen narrator (Phase 9q). Falls back to the catalog default
+  // when book.voice_id is unset, which keeps every pre-9q book working
+  // unchanged. The voice's `mode` field drives all the downstream branching:
+  // synced → SSML with marks + timepoints; premium → no marks, no timepoints,
+  // and (for Chirp 3 HD) no SSML at all. The voice's `provider` field drives
+  // which TTS API to call (Google vs AWS Polly — Phase 9s).
+  const chosenVoice = getVoiceById(book.voice_id as string | undefined);
+  const voiceMode = chosenVoice.mode;
+  const isPremium = voiceMode === "premium";
+  // Voices that don't accept SSML at all (Chirp 3 HD on Google, Generative
+  // on Polly). Provider passes plain text to those.
+  const isPlainText =
+    chosenVoice.tier === "chirp3-hd" || chosenVoice.tier === "polly-generative";
+
+  // Derive providerId from the voice (9s). Pre-9s callers may have sent
+  // body.provider, but we override with the voice's authoritative provider
+  // so the route can never be in an inconsistent state where, e.g., body
+  // said "google" but the voice is a Polly voice.
+  const providerId: TTSProviderId = chosenVoice.provider;
+
   // Get the provider
   let provider;
   try {
@@ -221,16 +240,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       { status: 400 },
     );
   }
-
-  // Resolve the chosen narrator (Phase 9q). Falls back to the catalog default
-  // when book.voice_id is unset, which keeps every pre-9q book working
-  // unchanged. The voice's `mode` field drives all the downstream branching:
-  // synced → SSML with marks + timepoints; premium → no marks, no timepoints,
-  // and (for Chirp 3 HD) no SSML at all.
-  const chosenVoice = getVoiceById(book.voice_id as string | undefined);
-  const voiceMode = chosenVoice.mode;
-  const isPremium = voiceMode === "premium";
-  const isPlainText = chosenVoice.tier === "chirp3-hd"; // no SSML support
 
   // Determine where to resume from. If `reset` is true, wipe and start fresh.
   // Otherwise pick up from voice_segments.length (since segments are appended

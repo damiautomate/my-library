@@ -99,7 +99,7 @@ function buildPrompt(
   const catalog = candidates
     .map(
       (v) =>
-        `  - id: "${v.id}", name: "${v.displayName}", gender: ${v.gender}, accent: ${v.accent}, mode: ${v.mode}, tone: "${v.description}", bestFor: [${v.bestFor.map((t) => `"${t}"`).join(", ")}]`,
+        `  - id: "${v.id}", name: "${v.displayName}", provider: ${v.provider}, gender: ${v.gender}, accent: ${v.accent}, mode: ${v.mode}, tone: "${v.description}", bestFor: [${v.bestFor.map((t) => `"${t}"`).join(", ")}]`,
     )
     .join("\n");
 

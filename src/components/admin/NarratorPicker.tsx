@@ -565,6 +565,7 @@ function VoiceCard({
             <Badge subtle>
               {voice.gender === "female" ? "Female" : "Male"}
             </Badge>
+            <Badge subtle>{voice.provider === "aws" ? "AWS" : "Google"}</Badge>
           </div>
         </div>
       </div>

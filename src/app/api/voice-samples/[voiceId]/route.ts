@@ -65,11 +65,16 @@ export async function GET(
   }
 
   // First-ever request for this voice — synthesize and cache.
-  const provider = getProvider("google");
+  // 9s: use the voice's own provider rather than hardcoding google. AWS
+  // Polly voices route through the Polly provider; Google voices through
+  // the Google provider. Same SynthesizeInput contract, so the branching
+  // below (chirp3-hd → text-only, premium → SSML w/o marks, synced → text)
+  // works for both backends without further changes.
+  const provider = getProvider(voice.provider);
   let result;
   try {
-    if (voice.tier === "chirp3-hd") {
-      // Chirp 3 HD: plain text only, no SSML.
+    if (voice.tier === "chirp3-hd" || voice.tier === "polly-generative") {
+      // Chirp 3 HD and Polly Generative: plain text only, no SSML.
       result = await provider.synthesize({
         text: SAMPLE_TEXT,
         voiceId: voice.id,

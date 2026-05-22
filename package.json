@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-polly": "^3.658.0",
     "cloudinary": "^2.4.0",
     "clsx": "^2.1.1",
     "firebase": "^10.13.0",
