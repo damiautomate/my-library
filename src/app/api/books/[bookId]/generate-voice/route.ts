@@ -475,9 +475,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // without marks (Studio voices reject marks); premium-Chirp uses plain
   // text (Chirp 3 HD rejects all SSML). All three return a string that the
   // provider can consume — only the synthesize args differ below.
+  //
+  // 9s.2: AWS Polly's Neural / Long-form / Generative engines all reject
+  // <emphasis>. We pass skipEmphasis when the provider is AWS so the SSML
+  // we send is something Polly will accept. Headings still benefit from the
+  // longer pre/post breaks; just no prosody envelope on AWS.
   const buildBatchInput = (paragraphs: FlatParagraph[]): string => {
     const cast = paragraphs as ParagraphForSSML[];
-    if (!isPremium) return buildParagraphSSML(cast);
+    if (!isPremium) {
+      return buildParagraphSSML(cast, {
+        skipEmphasis: chosenVoice.provider === "aws",
+      });
+    }
     if (isPlainText) return buildParagraphPlainText(cast);
     return buildParagraphSSMLNoMarks(cast);
   };
