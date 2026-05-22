@@ -323,10 +323,21 @@ class GoogleProvider implements TTSProvider {
 
 class AwsPollyProvider implements TTSProvider {
   id: TTSProviderId = "aws";
-  // Polly neural accepts up to 3000 billed characters (text) or 6000 raw
-  // characters (SSML including markup) per request. We use 5000 as a safe
-  // cap with headroom for SSML overhead.
-  maxCharsPerCall = 5000;
+  // Polly's per-request character cap is tighter than Google's. Per the
+  // AWS Polly SynthesizeSpeech docs:
+  //
+  //   - Neural engine: 3,000 total characters (text + SSML markup)
+  //   - Generative engine: 2,000 characters (plain text — no SSML accepted)
+  //   - Long-form engine: 3,000 total (same as Neural)
+  //
+  // We use 2,000 here as a single value that's safe across ALL Polly
+  // engines we expose. Generative's 2,000-char ceiling is the binding
+  // constraint; Neural just runs at lower utilization. The route's batcher
+  // packs paragraphs up to this size, then sends each batch as one
+  // synthesizeSpeech call. ~33% more batches than Google means slightly
+  // more API roundtrips per segment, but the cross-batch timing is safe
+  // thanks to the mp3FrameDuration parser from Phase 9n.
+  maxCharsPerCall = 2000;
   supportsTimepoints = true;
 
   async synthesize(input: SynthesizeInput): Promise<SynthesizeResult> {
