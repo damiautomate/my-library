@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
+import { BookCover } from "@/components/library/BookCover";
 import { Tag } from "@/components/ui/Tag";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -116,18 +117,11 @@ function BookDetailContent() {
         {/* Cover + progress + shelf actions */}
         <div className="md:col-span-4">
           <div className="aspect-[2/3] overflow-hidden rounded-sm border ml-hairline bg-parchment-200 shadow-paper-lg">
-            {book.cover_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={book.cover_url}
-                alt={book.title}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center text-ink-500/40">
-                <BookOpen size={56} />
-              </div>
-            )}
+            <BookCover
+              url={book.cover_url}
+              alt={book.title}
+              fallbackSize={56}
+            />
           </div>
 
           {/* Reading progress card */}

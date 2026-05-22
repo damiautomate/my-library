@@ -189,7 +189,7 @@ function ReadContent() {
     book.voice_segments != null && book.voice_segments.length > 0;
 
   return (
-    <main className="mx-auto max-w-6xl px-6 pb-16 pt-6">
+    <main className="mx-auto max-w-6xl px-3 pb-16 pt-6 sm:px-6">
       <BackBar bookId={bookId!} title={book.title} pct={livePct} />
 
       {/* Mode switcher when multiple available */}

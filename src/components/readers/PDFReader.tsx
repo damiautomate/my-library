@@ -114,7 +114,25 @@ export function PDFReader({
   const [page, setPage] = useState<number>(initialPage ?? 1);
   // The base width = the container's measured CSS pixel width. Scale multiplies it.
   const [containerWidth, setContainerWidth] = useState<number>(800);
-  const [scale, setScale] = useState(1);
+  const [scale, setScale] = useState(() => {
+    // 9r: on first mount, pick an initial scale that fits the PDF page to
+    // the viewport width on narrow (mobile) screens. Without this, a US
+    // Letter page (~612px natural width) at 1.0 scale overflows horizontally
+    // on a 360px phone, forcing horizontal scroll on every page. After
+    // mount the user can still zoom freely with the ± buttons.
+    if (typeof window === "undefined") return 1;
+    const PDF_NATURAL_WIDTH = 612; // US Letter at 72dpi; A4 is ~595, close enough
+    // The reader page wraps PDFReader in px-3 on mobile / px-6 on sm+
+    // (= 24px or 48px combined horizontal padding). Use 24 for the mobile
+    // path here — we only auto-fit when below 640px anyway, so the smaller
+    // padding applies.
+    const usable = window.innerWidth - 24;
+    if (usable < PDF_NATURAL_WIDTH) {
+      // Clamp to 0.5 so very small viewports don't produce illegibly tiny text.
+      return Math.max(0.5, usable / PDF_NATURAL_WIDTH);
+    }
+    return 1;
+  });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showToolbar, setShowToolbar] = useState(true);
   const [showHint, setShowHint] = useState(false);
@@ -648,14 +666,22 @@ export function PDFReader({
       className="relative flex w-full flex-col items-center"
       style={isFullscreen ? { background: "#FDFBF5", height: "100vh" } : undefined}
     >
-      {/* Auto-hiding toolbar */}
+      {/* Auto-hiding toolbar.
+       *
+       * Mobile (≤640px): stacks the navigation group on top and the zoom +
+       * fullscreen group underneath, right-aligned. The nav group also wraps
+       * within itself so the audio mini-player and "Following voice" chip
+       * drop to a second nav line on very narrow screens.
+       *
+       * Desktop (≥640px): single row, nav on the left, zoom/fullscreen on
+       * the right — exactly as before. */}
       <div
         className={
-          "sticky top-0 z-10 mb-3 flex w-full items-center justify-between gap-3 border-b ml-hairline bg-parchment-50/95 px-3 py-2 backdrop-blur-sm transition-opacity " +
+          "sticky top-0 z-10 mb-3 flex w-full flex-col gap-2 border-b ml-hairline bg-parchment-50/95 px-3 py-2 backdrop-blur-sm transition-opacity sm:flex-row sm:items-center sm:justify-between sm:gap-3 " +
           (showToolbar ? "opacity-100" : "opacity-0 pointer-events-none")
         }
       >
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           {outline && outline.length > 0 && (
             <button
               type="button"
@@ -704,11 +730,15 @@ export function PDFReader({
           </button>
           {currentReadingPage != null && (
             <span
-              className="inline-flex items-center gap-1 rounded-full bg-forest-50 px-2.5 py-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-700"
+              className="inline-flex items-center gap-1 rounded-full bg-forest-50 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-700 sm:px-2.5"
               title="The voice reader is playing — the PDF is following along page-by-page"
             >
               <Headphones size={11} />
-              Following voice · pg {currentReadingPage}
+              {/* On mobile the chip is tight; hide the prose and show only
+               * the page number. The icon + "pg N" still telegraphs "audio
+               * is driving the page." */}
+              <span className="hidden sm:inline">Following voice · </span>
+              pg {currentReadingPage}
             </span>
           )}
           {/* Audio mini-player — visible whenever the parent has wired up voice
@@ -759,7 +789,7 @@ export function PDFReader({
           )}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 self-end sm:self-auto">
           <button
             type="button"
             onClick={() => setScale((s) => Math.max(MIN_SCALE, s - SCALE_STEP))}
