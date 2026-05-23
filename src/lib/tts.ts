@@ -379,7 +379,18 @@ class AwsPollyProvider implements TTSProvider {
     const inputContent = input.ssml ?? input.text ?? "";
     const sourceLen = inputContent.length;
 
-    // --- Audio call ---
+    // --- Audio + marks in parallel ---
+    //
+    // Polly returns audio and timepoints from separate synthesizeSpeech
+    // calls. They're INDEPENDENT — same input, same voice, just different
+    // OutputFormat — so we fire them in parallel via Promise.all. Halves
+    // per-batch wall time vs sequential, which matters because Polly's
+    // tighter char limits already mean ~3x more batches than Google. Phase
+    // 9s.3 added this to keep AWS-targeted runs within Vercel's 60s
+    // function budget.
+    const wantMarks =
+      requestTimepoints && engine !== "generative" && !!input.ssml;
+
     const audioCmd = new SynthesizeSpeechCommand({
       Text: inputContent,
       TextType: inputType,
@@ -389,53 +400,57 @@ class AwsPollyProvider implements TTSProvider {
       // Polly chooses sample rate automatically per engine; explicit override
       // not needed for our use case.
     });
-    const audioResp = await client.send(audioCmd);
+    const marksCmd = wantMarks
+      ? new SynthesizeSpeechCommand({
+          Text: inputContent,
+          TextType: inputType,
+          OutputFormat: "json",
+          SpeechMarkTypes: ["ssml"],
+          VoiceId: stripPollyEngineSuffix(voiceName) as PollyVoiceId,
+          Engine: engine,
+        })
+      : null;
+
+    const [audioResp, marksResp] = await Promise.all([
+      client.send(audioCmd),
+      marksCmd ? client.send(marksCmd) : Promise.resolve(null),
+    ]);
+
     if (!audioResp.AudioStream) {
       throw new Error("Polly returned no audio stream");
     }
     const audio = await streamToBuffer(audioResp.AudioStream);
 
-    // --- Timepoint call (only when requested AND engine supports marks) ---
+    // --- Parse marks (if requested) ---
     let timepoints: Timepoint[] = [];
-    if (requestTimepoints && engine !== "generative" && input.ssml) {
-      const marksCmd = new SynthesizeSpeechCommand({
-        Text: inputContent,
-        TextType: inputType,
-        OutputFormat: "json",
-        SpeechMarkTypes: ["ssml"],
-        VoiceId: stripPollyEngineSuffix(voiceName) as PollyVoiceId,
-        Engine: engine,
-      });
-      const marksResp = await client.send(marksCmd);
-      if (marksResp.AudioStream) {
-        const marksRaw = await streamToString(marksResp.AudioStream);
-        // Polly returns JSON-lines: one JSON object per line. Filter to ssml
-        // marks (we set SpeechMarkTypes to ssml only, but be defensive).
-        timepoints = marksRaw
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            try {
-              return JSON.parse(line) as {
-                time: number;
-                type: string;
-                value: string;
-              };
-            } catch {
-              return null;
-            }
-          })
-          .filter(
-            (m): m is { time: number; type: string; value: string } =>
-              m !== null && m.type === "ssml",
-          )
-          .map((m) => ({
-            markName: m.value,
-            // Polly returns ms; the SynthesizeResult contract is seconds.
-            time: m.time / 1000,
-          }));
-      }
+    if (marksResp?.AudioStream) {
+      const marksRaw = await streamToString(marksResp.AudioStream);
+      // Polly returns JSON-lines: one JSON object per line. Filter to ssml
+      // marks (we set SpeechMarkTypes to ssml only, but be defensive).
+      timepoints = marksRaw
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          try {
+            return JSON.parse(line) as {
+              time: number;
+              type: string;
+              value: string;
+            };
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (m): m is { time: number; type: string; value: string } =>
+            m !== null && m.type === "ssml",
+        )
+        .map((m) => ({
+          markName: m.value,
+          // Polly returns ms; the SynthesizeResult contract is seconds.
+          time: m.time / 1000,
+        }));
     }
 
     // Duration via the same frame parser we use for Google. Polly's MP3

@@ -27,7 +27,23 @@ interface Props {
 export function ConversionActions({ book, onChanged }: Props) {
   const hasPdf = !!book.pdf_url;
   const hasEpub = !!book.epub_url;
-  const hasVoice = Array.isArray(book.voice_segments) && book.voice_segments.length > 0;
+  // Phase 9s.3 — partial-completion detection. We can't tell just from
+  // segments.length whether a book is "fully voiced" or "partially voiced
+  // and ready to resume" without knowing the expected total. voice_total_
+  // segments is written on each segment save (9s.3 onward), so:
+  //   - 0 segments     → no voice → button is "Generate voice"
+  //   - n < total      → interrupted → button is "Resume" (no reset)
+  //   - n === total    → complete → button is "Re-generate" (full reset)
+  //   - total missing  → pre-9s.3 book → treat as complete (preserves old
+  //                      behavior: Re-generate wipes)
+  const segCount = Array.isArray(book.voice_segments)
+    ? book.voice_segments.length
+    : 0;
+  const totalExpected = book.voice_total_segments ?? 0;
+  const hasVoice = segCount > 0;
+  const voicePartial =
+    hasVoice && totalExpected > 0 && segCount < totalExpected;
+  const voiceComplete = hasVoice && !voicePartial; // includes unknown-total case
 
   const [convertBusy, setConvertBusy] = useState(false);
   const [convertResult, setConvertResult] = useState<string | null>(null);
@@ -90,8 +106,8 @@ export function ConversionActions({ book, onChanged }: Props) {
     }
   }
 
-  async function generateVoice() {
-    const reset = hasVoice;
+  async function generateVoice(opts: { reset: boolean }) {
+    const reset = opts.reset;
     // The native confirm() that used to live here was replaced by an inline
     // cost-aware confirmation panel (Phase 9q.2 — see the regen confirm
     // panel rendered below). By the time generateVoice() runs, the user has
@@ -102,6 +118,18 @@ export function ConversionActions({ book, onChanged }: Props) {
     setVoiceErr(null);
     setVoiceProgress(null);
     cancelVoiceRef.current = false;
+
+    // 9s.3: track the latest processed count in a local var. The earlier
+    // implementation read voiceProgress?.done in the error path, but that's
+    // a closure-captured value from function entry — always null even after
+    // dozens of segments succeeded. We need the live count for the "X
+    // segments saved" message at the bottom of the loop.
+    //
+    // Seed from book.voice_segments.length so that even if the very first
+    // API call fails, the message reports any pre-existing segments
+    // accurately (e.g. when resuming a prior partial run).
+    let lastProcessed = reset ? 0 : segCount;
+    let lastTotal = totalExpected;
 
     let done = false;
     let totalChars = 0;
@@ -131,7 +159,6 @@ export function ConversionActions({ book, onChanged }: Props) {
             Authorization: await authHeader(),
           },
           body: JSON.stringify({
-            provider: "google",
             // Wipe existing segments only on the very first call after the
             // user confirmed a re-gen — subsequent calls are appends.
             reset: firstCall && reset,
@@ -163,6 +190,8 @@ export function ConversionActions({ book, onChanged }: Props) {
             // SUCCESS — advance and reset retry counter
             firstCall = false;
             retries = 0;
+            lastProcessed = data.processed ?? lastProcessed;
+            lastTotal = data.total ?? lastTotal;
             setVoiceProgress({ done: data.processed, total: data.total });
             if (data.segment) totalChars += data.segment.chars ?? 0;
             done = !!data.done;
@@ -179,7 +208,7 @@ export function ConversionActions({ book, onChanged }: Props) {
       // We got here via a failure. Decide retry vs bail.
       if (transientFailure && retries < MAX_RETRIES && !cancelVoiceRef.current) {
         retries++;
-        const segNum = (voiceProgress?.done ?? 0) + 1;
+        const segNum = lastProcessed + 1;
         setVoiceErr(
           `Segment ${segNum} hit a snag (${transientFailure}). Retrying ${retries}/${MAX_RETRIES}…`,
         );
@@ -191,20 +220,24 @@ export function ConversionActions({ book, onChanged }: Props) {
       }
 
       // Out of retries, or a fatal error.
-      const completed = voiceProgress?.done ?? 0;
+      const completed = lastProcessed;
       const segNum = completed + 1;
       const finalMsg =
         fatalFailure ??
         (transientFailure
-          ? `Couldn't complete segment ${segNum} after ${MAX_RETRIES + 1} tries (${transientFailure}). ${completed} segments saved — click Re-generate to resume from segment ${segNum}.`
+          ? `Couldn't complete segment ${segNum} after ${MAX_RETRIES + 1} tries (${transientFailure}). ${completed} of ${lastTotal || "?"} segments saved — click Resume to continue from segment ${segNum}.`
           : "Unknown error.");
       setVoiceErr(finalMsg);
+      // Tell the parent to refetch the book so the partial state is
+      // reflected immediately (the Re-generate button will switch to
+      // Resume on next render).
+      onChanged?.();
       break;
     }
 
     if (done) {
       setVoiceResult(
-        `Generation complete — ${voiceProgress?.total ?? "?"} segments, ${totalChars.toLocaleString()} characters synthesized.`,
+        `Generation complete — ${lastTotal || voiceProgress?.total || "?"} segments, ${totalChars.toLocaleString()} characters synthesized.`,
       );
       onChanged?.();
     }
@@ -277,64 +310,117 @@ export function ConversionActions({ book, onChanged }: Props) {
         <div className="min-w-0 flex-1">
           <p className="font-display text-base text-ink-900">
             Voice audio
-            {hasVoice && (
+            {voiceComplete && (
               <span className="ml-2 inline-flex items-center gap-1 align-middle font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-600">
                 <CheckCircle2 size={11} />
                 Generated
               </span>
             )}
+            {voicePartial && (
+              <span className="ml-2 inline-flex items-center gap-1 align-middle font-mono text-[0.6rem] uppercase tracking-[0.15em] text-oxblood-700">
+                <AlertTriangle size={11} />
+                Partial · {segCount} of {totalExpected}
+              </span>
+            )}
           </p>
           <p className="mt-1 max-w-xl text-xs text-ink-600">
             Generate narration audio so members can listen to the book. Uses
-            Google Cloud TTS in chunks of ~10 pages each, synced with the page
-            position so switching between tabs preserves where you are.
+            Google Cloud TTS (or AWS Polly, depending on the chosen narrator)
+            in chunks of ~10 pages each, synced with the page position so
+            switching between tabs preserves where you are.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={
-            voiceBusy
-              ? cancelVoice
-              : () => {
-                  // 9q.2 — show the cost-aware confirmation panel instead of
-                  // running generateVoice immediately. The panel's confirm
-                  // button is what actually kicks off synthesis.
-                  setVoiceErr(null);
-                  setVoiceResult(null);
-                  setShowRegenConfirm(true);
-                }
-          }
-          disabled={showRegenConfirm}
-          className={
-            "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-xs disabled:opacity-50 " +
-            (voiceBusy
-              ? "border-oxblood-700 bg-oxblood-50 text-oxblood-700 hover:bg-oxblood-100"
-              : "border-ink-500/30 bg-parchment-50 text-ink-700 hover:bg-parchment-100")
-          }
-        >
-          {voiceBusy ? (
-            <>
-              <X size={12} /> Stop
-            </>
-          ) : (
-            <>
-              <Headphones size={12} />
-              {hasVoice ? "Re-generate" : "Generate voice"}
-            </>
+        {/* Button block. Three modes:
+         *
+         *   Busy   → Stop button (cancels mid-generation, segments stay saved)
+         *   Partial→ Resume (no cost panel) + small "Start over" link (opens
+         *           cost panel for full regen)
+         *   Else   → Generate voice / Re-generate (opens cost panel)
+         *
+         * The 9s.3 split between Resume and Re-generate exists because the
+         * pre-9s.3 single button always wiped existing segments when hasVoice
+         * was true. After a partial run, that meant the user couldn't pick
+         * up from segment N — they had to redo segments 1..N-1 from scratch.
+         */}
+        <div className="flex flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={
+              voiceBusy
+                ? cancelVoice
+                : voicePartial
+                  ? () => {
+                      // Resume = direct call, no cost panel. The user has
+                      // already approved cost for this run; resuming just
+                      // finishes what they started.
+                      setVoiceErr(null);
+                      setVoiceResult(null);
+                      void generateVoice({ reset: false });
+                    }
+                  : () => {
+                      // Generate / Re-generate flows go through the cost
+                      // panel. Panel's onConfirm decides reset based on
+                      // whether voice exists (replacing old data).
+                      setVoiceErr(null);
+                      setVoiceResult(null);
+                      setShowRegenConfirm(true);
+                    }
+            }
+            disabled={showRegenConfirm}
+            className={
+              "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 text-xs disabled:opacity-50 " +
+              (voiceBusy
+                ? "border-oxblood-700 bg-oxblood-50 text-oxblood-700 hover:bg-oxblood-100"
+                : voicePartial
+                  ? "border-oxblood-700 bg-oxblood-700 text-parchment-50 hover:bg-oxblood-800"
+                  : "border-ink-500/30 bg-parchment-50 text-ink-700 hover:bg-parchment-100")
+            }
+          >
+            {voiceBusy ? (
+              <>
+                <X size={12} /> Stop
+              </>
+            ) : voicePartial ? (
+              <>
+                <Headphones size={12} />
+                Resume from segment {segCount + 1}
+              </>
+            ) : (
+              <>
+                <Headphones size={12} />
+                {hasVoice ? "Re-generate" : "Generate voice"}
+              </>
+            )}
+          </button>
+          {voicePartial && !voiceBusy && !showRegenConfirm && (
+            <button
+              type="button"
+              onClick={() => {
+                setVoiceErr(null);
+                setVoiceResult(null);
+                setShowRegenConfirm(true);
+              }}
+              className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500 underline-offset-2 hover:text-oxblood-700 hover:underline"
+            >
+              Start over
+            </button>
           )}
-        </button>
+        </div>
       </div>
 
       {/* Cost-aware regen confirmation panel (9q.2). Estimates character
        * count from either the existing segments (precise) or page_count
-       * (fallback), then multiplies by the voice's per-million-char rate. */}
+       * (fallback), then multiplies by the voice's per-million-char rate.
+       * 9s.3: reset is true whenever any voice exists (this panel only
+       * appears for Generate/Re-generate/Start over flows — Resume bypasses
+       * it entirely). */}
       {showRegenConfirm && !voiceBusy && (
         <RegenConfirmPanel
           book={book}
           onCancel={() => setShowRegenConfirm(false)}
           onConfirm={() => {
             setShowRegenConfirm(false);
-            void generateVoice();
+            void generateVoice({ reset: hasVoice });
           }}
         />
       )}

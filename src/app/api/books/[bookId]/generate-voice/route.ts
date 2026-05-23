@@ -56,7 +56,18 @@ function configureCloudinary() {
   });
 }
 
-const PAGES_PER_SEGMENT = 10;
+/**
+ * How many PDF pages we group into a single voice segment.
+ *
+ * Provider-aware (Phase 9s.3): Polly fits less text per API call (~1500
+ * SSML chars vs Google's 3500) AND needs two calls per batch (audio +
+ * marks), so the same 10 pages take ~4–5x more API calls on Polly. That
+ * pushes against Vercel's 60s function timeout. Dropping to 6 pages per
+ * segment for AWS gives roughly the same per-segment runtime as Google
+ * does at 10 pages.
+ */
+const PAGES_PER_SEGMENT_GOOGLE = 10;
+const PAGES_PER_SEGMENT_AWS = 6;
 
 /**
  * Decide whether a paragraph candidate is actually a printed page number,
@@ -167,10 +178,10 @@ interface PageGroup {
   pages: PdfPage[];
 }
 
-function groupPages(pages: PdfPage[]): PageGroup[] {
+function groupPages(pages: PdfPage[], pagesPerSegment: number): PageGroup[] {
   const groups: PageGroup[] = [];
-  for (let start = 0; start < pages.length; start += PAGES_PER_SEGMENT) {
-    const slice = pages.slice(start, start + PAGES_PER_SEGMENT);
+  for (let start = 0; start < pages.length; start += pagesPerSegment) {
+    const slice = pages.slice(start, start + pagesPerSegment);
     if (slice.length === 0) continue;
     groups.push({
       page_start: slice[0].page,
@@ -357,7 +368,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  const groups = groupPages(extracted.pages);
+  // 9s.3: AWS-targeted runs use smaller segments. See PAGES_PER_SEGMENT_*
+  // for the rationale — Polly does more API work per page than Google, so
+  // each Vercel function invocation handles fewer pages to stay under 60s.
+  const pagesPerSegment =
+    chosenVoice.provider === "aws"
+      ? PAGES_PER_SEGMENT_AWS
+      : PAGES_PER_SEGMENT_GOOGLE;
+  const groups = groupPages(extracted.pages, pagesPerSegment);
   const total = groups.length;
 
   // Already done?
@@ -712,6 +730,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     voice_segments: FieldValue.arrayUnion(segment),
     voice_provider: providerId,
     voice_total_seconds: newTotalSeconds,
+    voice_total_segments: total, // 9s.3 — total expected; client compares to segments.length
     voice_id: chosenVoice.id, // pin the chosen voice on the book (9q)
     voice_mode: voiceMode, // synced | premium (9q)
     updated_at: FieldValue.serverTimestamp(),

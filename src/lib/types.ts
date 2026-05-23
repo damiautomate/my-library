@@ -98,8 +98,18 @@ export interface BookDoc {
 
   /** Full-book narration audio, generated from the PDF via TTS — Phase 9. */
   voice_segments?: VoiceSegment[];
-  voice_provider?: "google" | "elevenlabs";
+  voice_provider?: "google" | "aws" | "elevenlabs";
   voice_total_seconds?: number;
+  /** Total expected number of voice segments for this book (Phase 9s.3).
+   * Written by generate-voice on each segment-save alongside the segment
+   * itself, so the client can compare voice_segments.length to this and
+   * detect a partial / interrupted generation. When segments.length equals
+   * voice_total_segments, voice generation is complete. When less, an
+   * earlier run was interrupted and the next click should "Resume" (no
+   * reset) rather than "Re-generate" (full reset). Undefined on books
+   * generated before 9s.3 — those are treated as complete to preserve the
+   * old behavior. */
+  voice_total_segments?: number;
   /** Cloudinary raw URL of the cached PDF extraction JSON (Phase 9o). The
    * generate-voice route extracts the entire PDF once on the first segment
    * call (10-30s for big books), then caches the result here so subsequent
