@@ -136,6 +136,20 @@ export interface BookDoc {
   okada_books_url?: string;
   external_url?: string;
 
+  // Public sharing (Phase 9t). A single, revocable, unguessable token grants
+  // anonymous read access to THIS book only — used for "share a book" links.
+  // Admin-only to create. share_enabled gates access independently of the
+  // token's existence so a link can be paused without losing the token.
+  /** Whether the share link is currently active. When false, /share/<token>
+   * returns 404 even if the token is correct. */
+  share_enabled?: boolean;
+  /** 24-char URL-safe random token. The ONLY credential the public share
+   * route and public file proxy accept. Regenerating it invalidates every
+   * previously-sent link. */
+  share_token?: string;
+  /** When the current token was generated. */
+  share_created_at?: Timestamp;
+
   // System
   added_by: string;
   added_at: Timestamp;
@@ -145,6 +159,39 @@ export interface BookDoc {
 
 /** Book with its Firestore document ID attached. */
 export type Book = BookDoc & { id: string };
+
+/**
+ * The strict subset of book data exposed on a public share page (Phase 9t).
+ * The public /api/share/[token] route returns ONLY these fields — never the
+ * full doc — so internal/admin metadata (added_by, status, voice config,
+ * external store links, the share token itself, etc.) never leaks to an
+ * anonymous viewer. File URLs are deliberately omitted; the share page loads
+ * files through the token-authorized proxy instead of receiving raw
+ * Cloudinary URLs.
+ */
+export interface SharedBook {
+  id: string;
+  title: string;
+  authors?: string[];
+  description?: string;
+  cover_url?: string;
+  page_count?: number;
+  /** Which reader tabs to offer — derived server-side from which files exist,
+   * so we don't reveal URLs just to decide which tabs to show. */
+  has_pdf: boolean;
+  has_epub: boolean;
+  has_voice: boolean;
+  has_audio_summary: boolean;
+  /** Voice playback data — needed client-side to drive the VoiceReader. The
+   * segment URLs here are already the token-authorized proxy paths, not raw
+   * Cloudinary URLs. */
+  voice_segments?: VoiceSegment[];
+  voice_mode?: "synced" | "premium";
+  voice_total_seconds?: number;
+  /** Chapter map for the "now reading: chapter X" label + lock-screen
+   * metadata. Title + page only — hrefs are harmless but unnecessary. */
+  chapter_map?: EpubChapterMapping[];
+}
 
 /**
  * Mapping of EPUB chapters to PDF source pages — generated during PDF→EPUB

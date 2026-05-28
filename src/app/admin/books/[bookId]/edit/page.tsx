@@ -13,6 +13,7 @@ import {
 } from "@/components/admin/BookForm";
 import { Button } from "@/components/ui/Button";
 import { ConversionActions } from "@/components/admin/ConversionActions";
+import { ShareControl } from "@/components/admin/ShareControl";
 import { getBook, updateBook, deleteBookForever } from "@/lib/books";
 import type { Book, BookStatus } from "@/lib/types";
 
@@ -104,6 +105,15 @@ function EditBookContent() {
 
       {book && (
         <ConversionActions
+          book={book}
+          onChanged={() => {
+            if (bookId) getBook(bookId).then((b) => b && setBook(b));
+          }}
+        />
+      )}
+
+      {book && book.status === "published" && (
+        <ShareControl
           book={book}
           onChanged={() => {
             if (bookId) getBook(bookId).then((b) => b && setBook(b));

@@ -18,6 +18,45 @@ import type { Highlight, ReadingProgressDoc, ReadingStatus } from "./types";
 
 const COL = "reading_progress";
 
+/**
+ * Sentinel userId for anonymous share-page viewers (Phase 9t). They have no
+ * account, so their reading position is persisted to localStorage instead of
+ * Firestore. Passing this as the userId to makeDebouncedSaver / saveProgress
+ * transparently routes saves to localStorage — the reader components don't
+ * need to know whether they're in member or guest mode.
+ */
+export const GUEST_USER_ID = "__guest__";
+
+function guestKey(bookId: string): string {
+  return `ml.guestProgress.${bookId}`;
+}
+
+/** Read a guest viewer's locally-saved progress for a book. Returns null when
+ * none exists or localStorage is unavailable (SSR / privacy mode). */
+export function getGuestProgress(bookId: string): SavePayload | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(guestKey(bookId));
+    return raw ? (JSON.parse(raw) as SavePayload) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Merge-and-save a guest viewer's progress to localStorage. */
+function saveGuestProgress(bookId: string, p: SavePayload): void {
+  if (typeof window === "undefined") return;
+  try {
+    const prev = getGuestProgress(bookId) ?? {};
+    window.localStorage.setItem(
+      guestKey(bookId),
+      JSON.stringify({ ...prev, ...p }),
+    );
+  } catch {
+    // localStorage full / blocked — non-fatal, progress just won't persist.
+  }
+}
+
 function progressId(userId: string, bookId: string): string {
   return `${userId}_${bookId}`;
 }
@@ -60,6 +99,14 @@ export async function saveProgress(
   bookId: string,
   payload: SavePayload,
 ): Promise<void> {
+  // Guest (share-page) viewers have no account and no Firestore write
+  // permission — persist to localStorage instead. This also catches the
+  // direct saveProgress call in VoiceReader's page-unload handler.
+  if (userId === GUEST_USER_ID) {
+    saveGuestProgress(bookId, payload);
+    return;
+  }
+
   const ref = doc(db, COL, progressId(userId, bookId));
   const existing = await getDoc(ref);
 
@@ -162,7 +209,11 @@ export function makeDebouncedSaver(
       timer = null;
       if (payload) {
         try {
-          await saveProgress(userId, bookId, payload);
+          if (userId === GUEST_USER_ID) {
+            saveGuestProgress(bookId, payload);
+          } else {
+            await saveProgress(userId, bookId, payload);
+          }
         } catch (e) {
           console.error("[progress] save failed", e);
         }
@@ -183,7 +234,11 @@ export function makeDebouncedSaver(
       if (pending) {
         const payload = pending;
         pending = null;
-        await saveProgress(userId, bookId, payload);
+        if (userId === GUEST_USER_ID) {
+          saveGuestProgress(bookId, payload);
+        } else {
+          await saveProgress(userId, bookId, payload);
+        }
       }
     },
   };

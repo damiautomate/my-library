@@ -17,7 +17,8 @@ import {
   SkipForward,
 } from "lucide-react";
 import { makeDebouncedSaver, saveProgress } from "@/lib/progress";
-import type { VoiceSegment } from "@/lib/types";
+import type { VoiceSegment, EpubChapterMapping } from "@/lib/types";
+import { chapterForPage } from "@/lib/chapters";
 
 /**
  * Currently-narrating paragraph info. The PDF/EPUB readers use this to
@@ -101,6 +102,16 @@ interface VoiceReaderProps {
    * is a callback-based alternative to forwardRef because next/dynamic
    * doesn't forward refs through its wrapper. */
   onControlsReady?: (handle: VoiceReaderHandle | null) => void;
+  /** Chapter map (from epub_chapter_map) for the "now reading: Ch. X" label
+   * and lock-screen metadata (Phase 9t). Optional — falls back to a page
+   * label when absent. */
+  chapterMap?: EpubChapterMapping[];
+  /** Book title — shown on the lock-screen / notification via MediaSession. */
+  bookTitle?: string;
+  /** Book authors — shown as the "artist" in lock-screen metadata. */
+  bookAuthors?: string[];
+  /** Cover image URL — shown as artwork on the lock-screen / notification. */
+  coverUrl?: string;
 }
 
 const NUDGE_SECONDS = 10;
@@ -311,6 +322,10 @@ export function VoiceReader({
   onNarratingParagraph,
   onPlayingChange,
   onControlsReady,
+  chapterMap,
+  bookTitle,
+  bookAuthors,
+  coverUrl,
 }: VoiceReaderProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -402,6 +417,14 @@ export function VoiceReader({
       current.page_start + Math.floor(segProgress * pageSpan),
     );
   }, [currentParagraph, current, position, initialPage]);
+
+  // Current chapter for the header label + lock-screen metadata (Phase 9t).
+  // Recomputed as the narrated page advances; null for books without a
+  // chapter map or while in front matter before the first chapter.
+  const currentChapter = useMemo(
+    () => chapterForPage(chapterMap, currentPage),
+    [chapterMap, currentPage],
+  );
 
   // Persist progress with the page tracking convention shared by PDF/EPUB.
   // We persist FOUR fields here:
@@ -739,7 +762,85 @@ export function VoiceReader({
     }
   }, [segIdx, position, saver]);
 
-  // Auto-advance to next segment when current ends
+  // ---- MediaSession: lock-screen / notification metadata + controls (9t) --
+  //
+  // Wires the OS media UI (Android notification, iOS lock screen, desktop
+  // media keys) to this reader. Shows the book cover, the current chapter as
+  // the "track" title, and the book title as the album. Action handlers map
+  // the hardware/notification buttons to our existing playback controls so
+  // the user can pause or skip without returning to the tab.
+  //
+  // Metadata updates whenever the chapter changes (so the notification tracks
+  // chapter transitions during playback) or the book identity changes.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator))
+      return;
+    const ms = navigator.mediaSession;
+    try {
+      ms.metadata = new MediaMetadata({
+        title: currentChapter?.title || bookTitle || "Narration",
+        artist: bookAuthors?.join(", ") || "",
+        album: bookTitle || "",
+        artwork: coverUrl
+          ? [
+              { src: coverUrl, sizes: "256x256", type: "image/jpeg" },
+              { src: coverUrl, sizes: "512x512", type: "image/jpeg" },
+            ]
+          : [],
+      });
+    } catch {
+      // MediaMetadata constructor can throw on some older browsers — ignore.
+    }
+  }, [currentChapter, bookTitle, bookAuthors, coverUrl]);
+
+  // Bind action handlers once. They call latest-ref versions so we don't churn
+  // handlers on every render (the underlying callbacks are memoized but their
+  // identities change as deps change).
+  const skipForwardRef = useRef(skipForward);
+  const skipBackRef = useRef(skipBack);
+  skipForwardRef.current = skipForward;
+  skipBackRef.current = skipBack;
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator))
+      return;
+    const ms = navigator.mediaSession;
+    const set = (
+      action: MediaSessionAction,
+      handler: (() => void) | null,
+    ) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch {
+        // Some actions aren't supported on all browsers — ignore.
+      }
+    };
+    set("play", () => void togglePlayLatestRef.current());
+    set("pause", () => void togglePlayLatestRef.current());
+    set("seekbackward", () => nudgeBackwardLatestRef.current(NUDGE_SECONDS));
+    set("seekforward", () => nudgeForwardLatestRef.current(NUDGE_SECONDS));
+    set("previoustrack", () => skipBackRef.current());
+    set("nexttrack", () => skipForwardRef.current());
+    return () => {
+      // Clear on unmount so a stale reader doesn't keep controlling the OS UI.
+      for (const a of [
+        "play",
+        "pause",
+        "seekbackward",
+        "seekforward",
+        "previoustrack",
+        "nexttrack",
+      ] as MediaSessionAction[]) {
+        set(a, null);
+      }
+    };
+  }, []);
+
+  // Keep the OS playback-state indicator in sync (play/pause glyph).
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator))
+      return;
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+  }, [playing]);
   function handleEnded() {
     if (segIdx < segments.length - 1) {
       const next = segIdx + 1;
@@ -810,22 +911,36 @@ export function VoiceReader({
         preload="metadata"
       />
 
-      {/* Header — segment + page tracker */}
+      {/* Header — chapter + segment + page tracker */}
       <div className="mb-4 flex items-baseline justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="font-mono text-[0.6rem] uppercase tracking-[0.2em] text-ink-500">
             Segment {segIdx + 1} of {segments.length}
           </p>
-          <p className="mt-1 font-display text-lg text-ink-900">
-            Page {currentPage}
-            {current && current.page_end !== current.page_start && (
-              <span className="ml-1 text-sm text-ink-500">
-                · narrating pp {current.page_start}–{current.page_end}
-              </span>
-            )}
-          </p>
+          {currentChapter ? (
+            <>
+              <p className="mt-1 truncate font-display text-lg leading-tight text-ink-900">
+                {currentChapter.title}
+              </p>
+              <p className="mt-0.5 text-sm text-ink-500">
+                Page {currentPage}
+                {current && current.page_end !== current.page_start && (
+                  <span> · pp {current.page_start}–{current.page_end}</span>
+                )}
+              </p>
+            </>
+          ) : (
+            <p className="mt-1 font-display text-lg text-ink-900">
+              Page {currentPage}
+              {current && current.page_end !== current.page_start && (
+                <span className="ml-1 text-sm text-ink-500">
+                  · narrating pp {current.page_start}–{current.page_end}
+                </span>
+              )}
+            </p>
+          )}
         </div>
-        <div className="text-right">
+        <div className="shrink-0 text-right">
           <p className="font-mono text-xs text-ink-700">
             {fmt(totalElapsed)} / {fmt(totalDuration)}
           </p>

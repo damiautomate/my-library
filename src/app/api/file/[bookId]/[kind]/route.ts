@@ -73,12 +73,45 @@ async function requireSignedIn(
   return { uid: decoded.uid, isAdmin };
 }
 
+/**
+ * Phase 9t — authorize a file request via a share token instead of a signed-in
+ * user. The token must match the requested book's share_token AND sharing must
+ * be enabled. Crucially we verify the token belongs to THIS bookId, so a valid
+ * token for book A can't be used to fetch book B's files. Returns true when the
+ * share grant is valid, false otherwise (caller then falls back to user auth).
+ */
+async function shareTokenGrantsAccess(
+  bookId: string,
+  token: string | null,
+): Promise<boolean> {
+  if (!token) return false;
+  const snap = await adminDb.collection("books").doc(bookId).get();
+  if (!snap.exists) return false;
+  const b = snap.data() as Record<string, unknown>;
+  return (
+    b.share_enabled === true &&
+    b.share_token === token &&
+    b.status === "published"
+  );
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: { bookId: string; kind: string } },
 ) {
-  const auth = await requireSignedIn(req);
-  if (auth instanceof NextResponse) return auth;
+  // Phase 9t — two authorization paths. A valid ?share=<token> for THIS book
+  // grants anonymous access (public share links). Otherwise fall back to the
+  // signed-in member/admin path. We resolve the share path first because it's
+  // a single doc read with no token-verify round-trip.
+  const shareToken = req.nextUrl.searchParams.get("share");
+  const viaShare = await shareTokenGrantsAccess(params.bookId, shareToken);
+
+  let isAdmin = false;
+  if (!viaShare) {
+    const auth = await requireSignedIn(req);
+    if (auth instanceof NextResponse) return auth;
+    isAdmin = auth.isAdmin;
+  }
 
   const kind = params.kind as Kind;
   if (!["pdf", "epub", "audio"].includes(kind)) {
@@ -92,8 +125,9 @@ export async function GET(
   }
   const book = bookSnap.data() as Record<string, unknown>;
 
-  // Visibility — members see only published; admins see everything
-  if (book.status !== "published" && !auth.isAdmin) {
+  // Visibility — members see only published; admins see everything. Share
+  // grants are already constrained to published books in the token check.
+  if (book.status !== "published" && !isAdmin && !viaShare) {
     return NextResponse.json({ error: "Not available" }, { status: 403 });
   }
 
