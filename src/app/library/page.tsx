@@ -79,13 +79,13 @@ function LibraryHomeContent() {
   }, [progressDocs, books]);
 
   return (
-    <main className="mx-auto max-w-7xl px-5 pb-24 pt-10 md:px-6">
+    <main className="mx-auto max-w-7xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-10">
       {/* Editorial hero */}
       <section className="pb-12">
         <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
           {greeting}, {firstName}
         </p>
-        <h1 className="mt-4 font-display text-4xl leading-[1.05] tracking-tightest md:text-6xl">
+        <h1 className="mt-4 font-display text-3xl leading-[1.05] tracking-tightest sm:text-4xl md:text-6xl">
           Eleven rooms. <span className="text-ink-600">Choose where to read.</span>
         </h1>
       </section>

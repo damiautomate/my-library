@@ -516,7 +516,7 @@ function BulkContent() {
         <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
           Admin · Bulk import
         </p>
-        <h1 className="mt-2 font-display text-4xl tracking-tightest">
+        <h1 className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl">
           Many books at once
         </h1>
         <p className="mt-3 max-w-2xl text-sm text-ink-600">

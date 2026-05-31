@@ -41,13 +41,13 @@ function BrowseContent() {
   );
 
   return (
-    <main className="mx-auto max-w-7xl px-6 pb-24 pt-10">
-      <header className="mb-8 flex items-baseline justify-between border-b ml-hairline pb-4">
+    <main className="mx-auto max-w-7xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-10">
+      <header className="mb-8 flex flex-col gap-3 border-b ml-hairline pb-4 sm:flex-row sm:items-baseline sm:justify-between">
         <div>
           <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
             Browse
           </p>
-          <h1 className="mt-2 font-display text-4xl tracking-tightest">
+          <h1 className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl">
             Every book, every dimension
           </h1>
         </div>

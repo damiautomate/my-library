@@ -50,13 +50,13 @@ function AdminDashboard() {
   }, []);
 
   return (
-    <main className="mx-auto max-w-6xl px-6 pb-24 pt-12">
-      <header className="mb-10 flex items-baseline justify-between border-b ml-hairline pb-4">
+    <main className="mx-auto max-w-6xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-12">
+      <header className="mb-10 flex flex-col gap-3 border-b ml-hairline pb-4 sm:flex-row sm:items-baseline sm:justify-between">
         <div>
           <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
             Admin
           </p>
-          <h1 className="mt-2 font-display text-4xl tracking-tightest">
+          <h1 className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl">
             The Librarian's desk
           </h1>
         </div>
@@ -121,7 +121,7 @@ function Stat({
       <p className="font-mono text-[0.6rem] uppercase tracking-[0.2em] text-ink-500">
         {label}
       </p>
-      <p className="mt-2 font-display text-4xl tracking-tightest text-ink-900">
+      <p className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl text-ink-900">
         {value}
       </p>
       {sub && <p className="mt-1 text-xs text-ink-600">{sub}</p>}

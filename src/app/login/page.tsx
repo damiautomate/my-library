@@ -130,7 +130,7 @@ export default function LoginPage() {
     <>
       <Header />
 
-      <main className="mx-auto flex max-w-md flex-col gap-6 px-6 py-16">
+      <main className="mx-auto flex max-w-md flex-col gap-6 px-4 py-12 sm:px-6 sm:py-16">
         <div>
           <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
             Enter the Library

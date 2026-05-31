@@ -106,13 +106,13 @@ function AdminBooksContent() {
   }
 
   return (
-    <main className="mx-auto max-w-6xl px-6 pb-24 pt-12">
-      <header className="mb-8 flex items-baseline justify-between border-b ml-hairline pb-4">
+    <main className="mx-auto max-w-6xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-12">
+      <header className="mb-8 flex flex-col gap-3 border-b ml-hairline pb-4 sm:flex-row sm:items-baseline sm:justify-between">
         <div>
           <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
             Admin · Books
           </p>
-          <h1 className="mt-2 font-display text-4xl tracking-tightest">
+          <h1 className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl">
             The Catalogue
           </h1>
         </div>
@@ -218,7 +218,7 @@ function AdminBooksContent() {
             )}
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-sm">
             <thead className="border-b ml-hairline bg-parchment-100 font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-600">
               <tr>
                 <th className="w-8 px-3 py-3 text-left">
@@ -307,7 +307,7 @@ function AdminBooksContent() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </main>

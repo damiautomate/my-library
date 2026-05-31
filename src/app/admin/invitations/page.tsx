@@ -114,12 +114,12 @@ function InvitationsContent() {
   }
 
   return (
-    <main className="mx-auto max-w-4xl px-6 pb-24 pt-12">
+    <main className="mx-auto max-w-4xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-12">
       <header className="mb-8 border-b ml-hairline pb-4">
         <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
           Admin · Invitations
         </p>
-        <h1 className="mt-2 font-display text-4xl tracking-tightest">
+        <h1 className="mt-2 font-display text-3xl tracking-tightest sm:text-4xl">
           The Allowlist
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-ink-600">
@@ -169,7 +169,7 @@ function InvitationsContent() {
         ) : items.length === 0 ? (
           <p className="px-5 py-10 text-center text-ink-600">No invitations yet.</p>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-sm">
             <thead className="border-b ml-hairline bg-parchment-100 font-mono text-[0.6rem] uppercase tracking-[0.18em] text-ink-600">
               <tr>
                 <th className="px-4 py-3 text-left">Email</th>
@@ -202,7 +202,7 @@ function InvitationsContent() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </section>
     </main>

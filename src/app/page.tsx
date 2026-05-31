@@ -6,9 +6,9 @@ export default function LandingPage() {
     <>
       <Header />
 
-      <main className="mx-auto max-w-7xl px-6 pb-24">
+      <main className="mx-auto max-w-7xl px-4 pb-20 sm:px-6 sm:pb-24">
         {/* Hero */}
-        <section className="grid grid-cols-1 gap-10 pb-16 pt-20 md:grid-cols-12">
+        <section className="grid grid-cols-1 gap-8 pb-12 pt-12 sm:gap-10 sm:pb-16 sm:pt-20 md:grid-cols-12">
           <div className="md:col-span-7">
             <p className="font-mono text-[0.7rem] uppercase tracking-[0.25em] text-oxblood-700">
               An invitation-only reading room
@@ -25,7 +25,7 @@ export default function LandingPage() {
               and the books that belong in each.
             </p>
 
-            <div className="mt-10 flex flex-wrap items-center gap-3">
+            <div className="mt-8 flex flex-wrap items-center gap-3 sm:mt-10">
               <Link
                 href="/login"
                 className="rounded-sm border border-oxblood-700 bg-oxblood-600 px-6 py-3 text-sm font-medium text-parchment-50 transition-colors hover:bg-oxblood-700"
@@ -43,15 +43,15 @@ export default function LandingPage() {
 
           {/* Decorative side: classical numbering */}
           <aside className="md:col-span-5">
-            <div className="ml-card relative overflow-hidden p-8">
-              <div className="absolute -right-6 -top-10 font-display text-[12rem] leading-none text-parchment-200 select-none">
+            <div className="ml-card relative overflow-hidden p-6 sm:p-8">
+              <div className="absolute -right-6 -top-10 font-display text-[8rem] leading-none text-parchment-200 select-none sm:text-[12rem]">
                 I
               </div>
               <div className="relative">
                 <p className="font-mono text-[0.65rem] uppercase tracking-[0.2em] text-ink-500">
                   Of the Library
                 </p>
-                <h2 className="mt-3 font-display text-3xl leading-tight tracking-tight">
+                <h2 className="mt-3 font-display text-2xl leading-tight tracking-tight sm:text-3xl">
                   What makes a library different from a bookshop?
                 </h2>
                 <p className="ml-dropcap mt-4 text-sm leading-relaxed text-ink-700">
@@ -68,7 +68,7 @@ export default function LandingPage() {
         <hr className="my-6" />
 
         {/* Editorial three-column principles */}
-        <section className="grid grid-cols-1 gap-8 py-12 md:grid-cols-3">
+        <section className="grid grid-cols-1 gap-6 py-10 sm:gap-8 sm:py-12 md:grid-cols-3">
           {[
             {
               n: "II",

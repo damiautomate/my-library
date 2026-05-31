@@ -38,13 +38,13 @@ function RoomContent() {
   if (!roomId || !room) return notFound();
 
   return (
-    <main className="mx-auto max-w-7xl px-6 pb-24">
+    <main className="mx-auto max-w-7xl px-4 pb-20 sm:px-6 sm:pb-24">
       {/* Hero band */}
       <section className="border-b ml-hairline py-14">
         <p className="font-mono text-[0.65rem] uppercase tracking-[0.25em] text-oxblood-700">
           A room in the library
         </p>
-        <h1 className="mt-4 font-display text-5xl leading-[1] tracking-tightest md:text-6xl">
+        <h1 className="mt-4 font-display text-3xl leading-[1.05] tracking-tightest sm:text-5xl md:text-6xl">
           {room.label}
         </h1>
         <p className="mt-4 max-w-2xl text-base text-ink-700">{room.desc}</p>

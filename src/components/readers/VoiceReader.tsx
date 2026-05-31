@@ -903,7 +903,7 @@ export function VoiceReader({
   const pct = totalDuration > 0 ? (totalElapsed / totalDuration) * 100 : 0;
 
   return (
-    <div className="rounded-sm border ml-hairline bg-parchment-50 p-5 shadow-paper">
+    <div className="rounded-sm border ml-hairline bg-parchment-50 p-4 shadow-paper sm:p-5">
       <audio
         ref={audioRef}
         onEnded={handleEnded}
@@ -1029,7 +1029,7 @@ export function VoiceReader({
       </div>
 
       {/* Rate selector */}
-      <div className="mt-5 flex items-center justify-center gap-1.5">
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-1.5">
         <span className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-ink-500">
           Speed
         </span>

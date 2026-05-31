@@ -111,12 +111,14 @@ function BookDetailContent() {
   const hasAudio = !!book.audio_summary_url;
 
   return (
-    <main className="mx-auto max-w-5xl px-6 pb-24 pt-12">
+    <main className="mx-auto max-w-5xl px-4 pb-20 pt-8 sm:px-6 sm:pb-24 sm:pt-12">
       {/* Header band */}
-      <header className="grid grid-cols-1 gap-10 border-b ml-hairline pb-10 md:grid-cols-12">
+      <header className="grid grid-cols-1 gap-6 border-b ml-hairline pb-8 sm:gap-10 sm:pb-10 md:grid-cols-12">
         {/* Cover + progress + shelf actions */}
         <div className="md:col-span-4">
-          <div className="aspect-[2/3] overflow-hidden rounded-sm border ml-hairline bg-parchment-200 shadow-paper-lg">
+          {/* On mobile the cover is centered and width-capped so it doesn't
+           * eat the entire first screen; on md+ it fills its column. */}
+          <div className="mx-auto aspect-[2/3] w-40 overflow-hidden rounded-sm border ml-hairline bg-parchment-200 shadow-paper-lg sm:w-48 md:mx-0 md:w-auto">
             <BookCover
               url={book.cover_url}
               alt={book.title}
@@ -168,7 +170,7 @@ function BookDetailContent() {
               {ROOMS[book.rooms[0]].label}
             </p>
           )}
-          <h1 className="mt-3 font-display text-4xl leading-[1.05] tracking-tightest md:text-5xl">
+          <h1 className="mt-3 font-display text-3xl leading-[1.05] tracking-tightest sm:text-4xl md:text-5xl">
             {book.title}
           </h1>
           {book.subtitle && (
