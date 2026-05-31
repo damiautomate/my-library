@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Library,
   LogOut,
@@ -27,11 +28,24 @@ export function Header() {
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  // Portal target only exists in the browser; gate on mount to stay SSR-safe.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // Close drawer on route change
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
+
+  // Lock background scroll while the drawer is open.
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
 
   async function handleSignOut() {
     await signOutUser();
@@ -141,68 +155,77 @@ export function Header() {
         </div>
       </div>
 
-      {/* Mobile drawer */}
-      {open && firebaseUser && (
-        <div
-          className="fixed inset-0 z-50 bg-ink-900/40 backdrop-blur-[1px] lg:hidden"
-          onClick={() => setOpen(false)}
-        >
+      {/* Mobile drawer — rendered through a portal to document.body so its
+       * fixed positioning is relative to the viewport and can never be
+       * trapped by the header's backdrop-blur (which establishes a
+       * containing block for fixed descendants on Chrome). */}
+      {mounted &&
+        open &&
+        firebaseUser &&
+        createPortal(
           <div
-            className="ml-auto flex h-full w-72 max-w-[85vw] flex-col bg-parchment-50 shadow-paper-lg"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[100] bg-ink-900/60 lg:hidden"
+            onClick={() => setOpen(false)}
+            role="dialog"
+            aria-modal="true"
           >
-            <div className="flex items-center justify-between border-b ml-hairline px-5 py-4">
-              <div className="flex items-center gap-2 font-mono text-[0.65rem] uppercase tracking-[0.2em] text-ink-600">
-                <UserIcon size={12} />
-                {userDoc?.display_name?.split(/[\s|]/)[0] ?? "Reader"}
+            <div
+              className="ml-auto flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-l border-ink-900/10 bg-parchment-50 shadow-paper-lg"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b ml-hairline px-5 py-4">
+                <div className="flex items-center gap-2 font-mono text-[0.65rem] uppercase tracking-[0.2em] text-ink-600">
+                  <UserIcon size={12} />
+                  {userDoc?.display_name?.split(/[\s|]/)[0] ?? "Reader"}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  className="rounded-sm p-1 text-ink-600 hover:bg-parchment-100"
+                  aria-label="Close menu"
+                >
+                  <XIcon size={16} />
+                </button>
               </div>
+
+              <nav className="flex flex-1 flex-col">
+                {NAV_LINKS.map((l) => (
+                  <Link
+                    key={l.href}
+                    href={l.href}
+                    className={
+                      "border-b ml-hairline px-5 py-3 font-display text-lg transition-colors " +
+                      (pathname === l.href
+                        ? "bg-parchment-100 text-oxblood-700"
+                        : "text-ink-800 hover:bg-parchment-100")
+                    }
+                  >
+                    {l.label}
+                  </Link>
+                ))}
+                {isAdmin && (
+                  <Link
+                    href="/admin"
+                    className="flex items-center gap-2 border-b ml-hairline px-5 py-3 font-display text-lg text-ink-800 hover:bg-parchment-100"
+                  >
+                    <Settings size={14} />
+                    Admin
+                  </Link>
+                )}
+              </nav>
+
               <button
                 type="button"
-                onClick={() => setOpen(false)}
-                className="rounded-sm p-1 text-ink-600 hover:bg-parchment-100"
-                aria-label="Close menu"
+                onClick={handleSignOut}
+                className="flex items-center gap-2 border-t ml-hairline px-5 py-4 text-sm text-ink-600 hover:bg-parchment-100 hover:text-oxblood-700"
               >
-                <XIcon size={16} />
+                <LogOut size={14} />
+                Sign out
               </button>
             </div>
-
-            <nav className="flex flex-1 flex-col">
-              {NAV_LINKS.map((l) => (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  className={
-                    "border-b ml-hairline px-5 py-3 font-display text-lg transition-colors " +
-                    (pathname === l.href
-                      ? "bg-parchment-100 text-oxblood-700"
-                      : "text-ink-800 hover:bg-parchment-100")
-                  }
-                >
-                  {l.label}
-                </Link>
-              ))}
-              {isAdmin && (
-                <Link
-                  href="/admin"
-                  className="flex items-center gap-2 border-b ml-hairline px-5 py-3 font-display text-lg text-ink-800 hover:bg-parchment-100"
-                >
-                  <Settings size={14} />
-                  Admin
-                </Link>
-              )}
-            </nav>
-
-            <button
-              type="button"
-              onClick={handleSignOut}
-              className="flex items-center gap-2 border-t ml-hairline px-5 py-4 text-sm text-ink-600 hover:bg-parchment-100 hover:text-oxblood-700"
-            >
-              <LogOut size={14} />
-              Sign out
-            </button>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </header>
   );
 }
