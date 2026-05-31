@@ -3,6 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { v2 as cloudinary } from "cloudinary";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
 import { extractPdfFull, type PdfPage } from "@/lib/pdf-extract";
+import { splitPageIntoParagraphs } from "@/lib/paragraphs";
 import {
   buildParagraphSSML,
   buildParagraphSSMLNoMarks,
@@ -72,29 +73,10 @@ const PAGES_PER_SEGMENT_AWS = 6;
 /**
  * Decide whether a paragraph candidate is actually a printed page number,
  * running header/footer, SKU code, or similar metadata we should NOT send
- * to TTS or treat as narratable content.
- *
- * Real-world examples found in the books we've tested:
- *   - "5"            → page number, plain digits
- *   - "— 4 —"        → page number wrapped in em-dashes
- *   - "30-0539"      → publisher SKU code on Copeland books
- *   - "iv", "xii"    → roman numeral pagination in front matter
- *
- * The filter is conservative — short heading text like "An Act of Courage"
- * or "Look Up!" must NOT match. The pattern requires the WHOLE paragraph to
- * be metadata-shaped, not just to start with a number.
+ * to TTS. NOTE: the implementation now lives in @/lib/paragraphs and is
+ * shared with the EPUB builder so the two index paragraphs identically
+ * (see that file's header for why that matters). Imported above.
  */
-function isMetadataParagraph(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return true;
-  if (trimmed.length > 15) return false;
-  if (/^[—–\-·•\s]*\d{1,4}[—–\-·•\s]*$/.test(trimmed)) return true;
-  if (/^\d{1,3}[-–]\d{2,5}$/.test(trimmed)) return true;
-  if (/^(page|pg\.?|p\.)\s*\d+$/i.test(trimmed)) return true;
-  if (/^[—–\-\s]*[ivxlcdm]{1,8}[—–\-\s]*$/i.test(trimmed)) return true;
-  if (/^[—–\-·•*\s]+$/.test(trimmed)) return true;
-  return false;
-}
 
 /** Hard cap on how many chars of a single paragraph we'll send to TTS in
  * one Google call. Google's SSML limit is 5000 chars per request including
@@ -110,29 +92,6 @@ function isMetadataParagraph(text: string): boolean {
  * the call site in POST() — it picks the cap based on chosenVoice.provider. */
 const TTS_PARAGRAPH_CHAR_CAP_GOOGLE = 3500;
 const TTS_PARAGRAPH_CHAR_CAP_AWS = 1500;
-
-/**
- * Split a page's extracted text into FULL paragraph strings (no truncation).
- *
- * Previously this function truncated each paragraph to 320 chars to keep
- * the per-segment Firestore document small. That truncation was applied to
- * the SAME text we sent to Google TTS — meaning any paragraph longer than
- * 320 chars got its tail amputated before synthesis, so Google literally
- * never narrated the rest. That was the cause of "audio skipping" reports.
- *
- * Now we keep paragraphs at their natural length. The caller is responsible
- * for any TTS-side chunking (see TTS_PARAGRAPH_CHAR_CAP) and for any storage
- * truncation done at write time.
- */
-function splitPageIntoParagraphs(rawPageText: string): string[] {
-  if (!rawPageText.trim()) return [];
-  return rawPageText
-    .replace(/\r\n?/g, "\n")
-    .split(/\n\s*\n+/)
-    .map((p) => p.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
-    .filter(Boolean)
-    .filter((p) => !isMetadataParagraph(p));
-}
 
 /**
  * Split a single paragraph at sentence boundaries into chunks that each fit

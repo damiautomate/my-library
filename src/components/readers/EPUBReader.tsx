@@ -166,15 +166,30 @@ export function EPUBReader({
     }
   }, [externalPage, chapterMap]);
 
-  // Voice-highlight target: prefer the precise paragraph (page + index) when
-  // available, otherwise fall back to highlighting all paragraphs on the
-  // narrated page. Paragraph data is only present on voice segments
-  // generated after Phase 9e; older segments still get page-level highlight.
+  // Scroll a just-highlighted paragraph into view so the EPUB follows the
+  // audio. Only scrolls when the element is meaningfully off-screen, so we
+  // don't fight the reader with a re-center on every 4×/sec timeupdate while
+  // the paragraph is already comfortably visible. Centered vertically.
+  function scrollFollow(el: Element, win: Window) {
+    try {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      const vh = win.innerHeight || 0;
+      if (vh === 0) return;
+      // "Comfortable" band = middle 60% of the viewport. If the paragraph's
+      // top is already inside it, leave the scroll alone.
+      const topInBand = rect.top >= vh * 0.2 && rect.top <= vh * 0.8;
+      if (topInBand) return;
+      (el as HTMLElement).scrollIntoView({ block: "center", behavior: "smooth" });
+    } catch {
+      /* iframe not ready / cross-origin guard — ignore */
+    }
+  }
   useEffect(() => {
     if (!renditionRef.current) return;
     try {
       const contents = renditionRef.current.getContents() as unknown as Array<{
         document: Document;
+        window: Window;
       }>;
       for (const c of contents) {
         if (!c || !c.document) continue;
@@ -188,14 +203,18 @@ export function EPUBReader({
           const matches = c.document.querySelectorAll(selector);
           if (matches.length > 0) {
             matches.forEach((el) => el.classList.add("voice-highlight"));
+            // Follow: bring the narrated paragraph into view.
+            scrollFollow(matches[0], c.window);
             continue;
           }
           // Paragraph not found in this chapter — try the looser page-level match
         }
         if (currentReadingPage != null) {
-          c.document
-            .querySelectorAll(`[data-source-page="${currentReadingPage}"]`)
-            .forEach((el) => el.classList.add("voice-highlight"));
+          const pageMatches = c.document.querySelectorAll(
+            `[data-source-page="${currentReadingPage}"]`,
+          );
+          pageMatches.forEach((el) => el.classList.add("voice-highlight"));
+          if (pageMatches.length > 0) scrollFollow(pageMatches[0], c.window);
         }
       }
     } catch (err) {
@@ -209,42 +228,70 @@ export function EPUBReader({
     const book = rendition.book;
     epubBookRef.current = book;
 
-    // Match the library's typography
+    // Match the library's typography. This theme drives the IN-APP render
+    // (the bundled styles.css only applies in external readers). Keep the two
+    // visually aligned: justified body with a first-line indent, headings set
+    // apart, no indent on the paragraph following a heading.
     rendition.themes.register("library", {
       body: {
-        "font-family": "'IBM Plex Sans', system-ui, sans-serif",
+        "font-family":
+          "Georgia, 'Iowan Old Style', 'Palatino Linotype', 'Times New Roman', serif",
         color: "#1A1410",
-        "line-height": "1.5",
-        // CRITICAL on mobile: turn off justification which spreads words and
-        // wastes horizontal space. left-aligned packs more text per line.
-        "text-align": "left !important",
-        // Tighter content padding so the iframe shows more text
-        padding: "0 !important",
+        "line-height": "1.62",
+        padding: "0 0.25rem !important",
         margin: "0 !important",
       },
-      "p, li": {
+      p: {
         "font-size": "1rem",
-        margin: "0 0 0.6em 0",
-        "text-align": "left !important",
+        margin: "0",
+        "text-indent": "1.3em",
+        "text-align": "justify",
+        hyphens: "auto",
+        "-webkit-hyphens": "auto",
       },
-      h1: { "font-size": "1.5rem", "margin-top": "1rem" },
-      h2: { "font-size": "1.25rem" },
-      h3: { "font-size": "1.05rem" },
+      // First paragraph & paragraphs right after a heading: no indent.
+      "h1 + p, h2 + p, h3 + p, .chapter-title + p, p:first-of-type": {
+        "text-indent": "0",
+      },
+      "p + p": { "margin-top": "0.15em" },
+      li: { "font-size": "1rem", "text-align": "left" },
+      h1: { "font-size": "1.5rem", "margin-top": "1rem", "line-height": "1.25" },
+      h2: {
+        "font-size": "1.28rem",
+        "font-weight": "700",
+        margin: "1.5em 0 0.5em 0",
+        "line-height": "1.25",
+      },
+      h3: {
+        "font-size": "1.06rem",
+        "font-weight": "600",
+        "font-style": "italic",
+        margin: "1.25em 0 0.35em 0",
+      },
+      ".chapter-title": {
+        "text-align": "center !important",
+        "text-indent": "0 !important",
+        margin: "1em 0 1.2em 0",
+      },
       blockquote: {
         "border-left": "2px solid rgba(123,45,38,0.4)",
         "padding-left": "0.75rem",
         margin: "1em 0",
         "font-style": "italic",
       },
-      // The .voice-highlight class is toggled on/off via DOM manipulation
-      // each time the currently-narrated page changes. CSS lives here so it
-      // gets applied to the iframe content automatically by epub.js.
+      "blockquote p": { "text-indent": "0", "text-align": "left" },
+      // The .voice-highlight class is toggled via DOM manipulation each time
+      // the narrated paragraph changes. scroll-margin keeps scrollIntoView
+      // from jamming the highlighted line against the very top/bottom edge.
       ".voice-highlight": {
         "background-color": "rgba(201, 169, 97, 0.28) !important",
         "border-left": "3px solid #C9A961 !important",
-        "padding": "0.2em 0.4em !important",
+        padding: "0.2em 0.4em !important",
         "margin-left": "-0.6em !important",
-        "transition": "background-color 0.3s ease !important",
+        "text-indent": "0 !important",
+        "scroll-margin-top": "40vh !important",
+        "scroll-margin-bottom": "40vh !important",
+        transition: "background-color 0.3s ease !important",
       },
     });
     rendition.themes.select("library");
@@ -282,6 +329,7 @@ export function EPUBReader({
           try {
             const contents = rendition.getContents() as unknown as Array<{
               document: Document;
+              window: Window;
             }>;
             for (const c of contents) {
               if (!c || !c.document) continue;
@@ -293,17 +341,20 @@ export function EPUBReader({
                 const matches = c.document.querySelectorAll(sel);
                 if (matches.length > 0) {
                   matches.forEach((el) => el.classList.add("voice-highlight"));
+                  scrollFollow(matches[0], c.window);
                   continue;
                 }
               }
               if (pageTarget != null) {
-                c.document
-                  .querySelectorAll(`[data-source-page="${pageTarget}"]`)
-                  .forEach((el) => el.classList.add("voice-highlight"));
+                const pm = c.document.querySelectorAll(
+                  `[data-source-page="${pageTarget}"]`,
+                );
+                pm.forEach((el) => el.classList.add("voice-highlight"));
+                if (pm.length > 0) scrollFollow(pm[0], c.window);
               }
             }
           } catch {}
-        }, 100);
+        }, 120);
       }
     });
 
@@ -423,6 +474,14 @@ export function EPUBReader({
         locationChanged={handleLocationChanged}
         getRendition={getRendition}
         epubInitOptions={{ openAs: "epub" }}
+        epubOptions={{
+          // Scrolled flow (vertical continuous) instead of paginated columns.
+          // This is what lets the reader smooth-scroll the currently-narrated
+          // paragraph into view so the EPUB follows the audio the way the PDF
+          // does — scrollIntoView is reliable in a scroll container, whereas
+          // flipping to the right column-page in paginated mode is fragile.
+          flow: "scrolled-doc",
+        }}
       />
       {pct !== null && (
         <div className="pointer-events-none absolute bottom-2 right-3 rounded-full bg-ink-900/70 px-2.5 py-0.5 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-parchment-50">

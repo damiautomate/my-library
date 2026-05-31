@@ -1,5 +1,10 @@
 import "server-only";
 import JSZip from "jszip";
+import {
+  splitPageIntoParagraphs,
+  repairHyphenation,
+  headingLevel,
+} from "@/lib/paragraphs";
 
 /**
  * Tiny EPUB 3 builder. Produces a valid .epub file from a list of chapters.
@@ -48,12 +53,69 @@ export interface EpubMeta {
 }
 
 const STYLESHEET = `
-body { font-family: Georgia, "Times New Roman", serif; line-height: 1.6; margin: 0; padding: 0; }
-h1 { font-size: 1.5em; margin: 1em 0 0.5em 0; line-height: 1.2; }
-h2 { font-size: 1.25em; margin: 1em 0 0.5em 0; }
-h3 { font-size: 1.1em; margin: 1em 0 0.5em 0; }
-p { margin: 0 0 0.8em 0; text-align: left; }
-.chapter-title { font-size: 1.6em; font-weight: bold; margin: 1.5em 0 1em 0; text-align: center; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 1em;
+  color: #1A1410;
+  widows: 2;
+  orphans: 2;
+}
+h1, h2, h3 { font-family: inherit; line-height: 1.25; font-weight: 700; }
+h1 { font-size: 1.6em; margin: 1.2em 0 0.8em 0; }
+h2 {
+  font-size: 1.3em;
+  margin: 1.6em 0 0.6em 0;
+  text-align: left;
+  page-break-after: avoid;
+  break-after: avoid;
+}
+h3 {
+  font-size: 1.08em;
+  margin: 1.3em 0 0.4em 0;
+  font-style: italic;
+  font-weight: 600;
+  page-break-after: avoid;
+  break-after: avoid;
+}
+/* Body paragraphs: justified with a traditional first-line indent. */
+p {
+  margin: 0;
+  text-align: justify;
+  text-indent: 1.3em;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+}
+/* First paragraph of the chapter, and any paragraph that immediately follows
+   a heading, should NOT be indented — standard book typography. */
+.chapter-title + p,
+h1 + p, h2 + p, h3 + p,
+p:first-of-type {
+  text-indent: 0;
+}
+/* A little breathing room between paragraphs in addition to the indent makes
+   on-screen reading easier than print-tight leading. */
+p + p { margin-top: 0.15em; }
+.chapter-title {
+  font-size: 1.7em;
+  font-weight: 700;
+  margin: 1em 0 1.2em 0;
+  text-align: center;
+  line-height: 1.2;
+  text-indent: 0;
+}
+blockquote {
+  border-left: 2px solid rgba(123,45,38,0.4);
+  padding-left: 0.9em;
+  margin: 1.1em 0;
+  font-style: italic;
+  color: #4a3f36;
+}
+blockquote p { text-indent: 0; text-align: left; }
+em, i { font-style: italic; }
+strong, b { font-weight: 700; }
 .page-marker { display: none; }
 `.trim();
 
@@ -68,50 +130,65 @@ function xmlEscape(s: string): string {
 }
 
 /**
- * Turn raw text into safe XHTML paragraphs. Splits on blank lines, escapes
- * each paragraph, and merges short adjacent lines that were probably wrapped
- * mid-sentence in the PDF.
- */
-function textToParagraphs(raw: string, sourcePage?: number): string {
-  if (!raw.trim()) return "<p>&#160;</p>";
-
-  // Normalise whitespace then split on blank lines
-  const blocks = raw
-    .replace(/\r\n?/g, "\n")
-    .split(/\n\s*\n+/)
-    .map((b) => b.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-
-  const attr = sourcePage !== undefined ? ` data-source-page="${sourcePage}"` : "";
-  return blocks.map((p) => `    <p${attr}>${xmlEscape(p)}</p>`).join("\n");
-}
-
-/**
- * Build paragraph HTML from per-page source. Each paragraph carries a
- * data-source-page attribute (which PDF page it came from) AND a
- * data-page-paragraph-index attribute (its position within that page's
- * paragraphs, 0-indexed). Together these let the voice reader broadcast
- * "page 47, paragraph 2 is being narrated right now" and the EPUB iframe
- * can highlight exactly one paragraph at a time instead of the whole page.
+ * Build paragraph/heading HTML from per-page source (Phase 9v rewrite).
+ *
+ * Indexing contract (DO NOT BREAK): paragraphs are split with the SHARED
+ * splitPageIntoParagraphs so the position of each block within a page matches
+ * exactly what the voice route used when generating segments. Each block gets:
+ *   - data-source-page          → the PDF page it came from
+ *   - data-page-paragraph-index → its 0-based position within that page's
+ *                                 (filtered) blocks  ← MUST equal the voice
+ *                                 reader's paragraphIndex for sync
+ *   - id="pg{page}-p{idx}"      → stable anchor the reader navigates to via
+ *                                 rendition.display("chapterN.xhtml#id")
+ *
+ * Presentation (does NOT affect indexing): each block is classified with
+ * headingLevel() and emitted as <h2>/<h3>/<p>, and its text is run through
+ * repairHyphenation() to fix words broken across PDF line wraps.
  */
 function pagesToParagraphs(
   sections: Array<{ page: number; text: string }>,
 ): string {
   const out: string[] = [];
   for (const sec of sections) {
-    if (!sec.text.trim()) continue;
-    const blocks = sec.text
-      .replace(/\r\n?/g, "\n")
-      .split(/\n\s*\n+/)
-      .map((b) => b.replace(/\n/g, " ").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
+    const blocks = splitPageIntoParagraphs(sec.text);
     blocks.forEach((block, idx) => {
-      out.push(
-        `    <p data-source-page="${sec.page}" data-page-paragraph-index="${idx}">${xmlEscape(block)}</p>`,
-      );
+      const clean = repairHyphenation(block);
+      const lvl = headingLevel(clean);
+      const attrs = `data-source-page="${sec.page}" data-page-paragraph-index="${idx}" id="pg${sec.page}-p${idx}"`;
+      if (lvl === 2) {
+        out.push(`    <h2 ${attrs}>${xmlEscape(clean)}</h2>`);
+      } else if (lvl === 3) {
+        out.push(`    <h3 ${attrs}>${xmlEscape(clean)}</h3>`);
+      } else {
+        out.push(`    <p ${attrs}>${xmlEscape(clean)}</p>`);
+      }
     });
   }
   return out.length > 0 ? out.join("\n") : "<p>&#160;</p>";
+}
+
+/**
+ * Turn raw text into safe XHTML paragraphs (used for non-page-sourced
+ * chapters, e.g. imported plain text). Uses the same shared splitter and
+ * heading classification, minus the per-page sync attributes.
+ */
+function textToParagraphs(raw: string, sourcePage?: number): string {
+  const blocks = splitPageIntoParagraphs(raw);
+  if (blocks.length === 0) return "<p>&#160;</p>";
+  return blocks
+    .map((block, idx) => {
+      const clean = repairHyphenation(block);
+      const lvl = headingLevel(clean);
+      const pageAttr =
+        sourcePage !== undefined
+          ? ` data-source-page="${sourcePage}" data-page-paragraph-index="${idx}" id="pg${sourcePage}-p${idx}"`
+          : "";
+      if (lvl === 2) return `    <h2${pageAttr}>${xmlEscape(clean)}</h2>`;
+      if (lvl === 3) return `    <h3${pageAttr}>${xmlEscape(clean)}</h3>`;
+      return `    <p${pageAttr}>${xmlEscape(clean)}</p>`;
+    })
+    .join("\n");
 }
 
 function chapterXhtml(title: string, body: string): string {
