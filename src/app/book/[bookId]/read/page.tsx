@@ -268,6 +268,10 @@ function ReadContent() {
               initialSeconds={progress?.current_voice_seconds}
               externalPage={mode === "voice" ? undefined : livePage}
               totalPages={book.page_count ?? undefined}
+              chapterMap={book.epub_chapter_map}
+              bookTitle={book.title}
+              bookAuthors={book.authors}
+              coverUrl={book.cover_url}
               onPercentChange={setLivePct}
               onPageChange={setLivePage}
               onNarratingPage={setVoicePage}
