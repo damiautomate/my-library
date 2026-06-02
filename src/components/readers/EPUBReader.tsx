@@ -128,9 +128,17 @@ export function EPUBReader({
 
   // External-page → chapter navigation. When the user is on another tab (PDF
   // or Voice) and advances pages there, externalPage changes. If chapterMap
-  // tells us which chapter contains that PDF page, navigate there. We only do
-  // this on changes — not on initial mount — to avoid overriding initialCfi.
-  const lastNavigatedPage = useRef<number | null>(null);
+  // tells us which chapter contains that PDF page, navigate there — but ONLY
+  // when the resolved chapter actually changes, not on every page turn.
+  //
+  // Why the dedupe matters: voice playback advances externalPage page-by-page
+  // within a chapter. If we re-displayed the chapter href on every page, the
+  // reader would snap back to the chapter's first page each time, then
+  // pageFollow would flip forward to the narrated paragraph — a visible
+  // back-and-forth jitter. Tracking the last navigated chapter href means we
+  // only load a new section when the reader genuinely crosses into it; the
+  // within-chapter page flipping is left entirely to pageFollow.
+  const lastNavigatedHref = useRef<string | null>(null);
   // Track current highlight target in refs so the "rendered" event handler
   // (set up once at mount) can read the latest values without re-binding.
   const currentHighlightPageRef = useRef<number | null>(null);
@@ -148,7 +156,6 @@ export function EPUBReader({
     if (externalPage == null) return;
     if (!chapterMap || chapterMap.length === 0) return;
     if (!renditionRef.current) return;
-    if (lastNavigatedPage.current === externalPage) return;
 
     // Find the chapter with the greatest source_page_start <= externalPage
     let target: EpubChapterMapping | null = null;
@@ -156,8 +163,8 @@ export function EPUBReader({
       if (c.source_page_start <= externalPage) target = c;
       else break;
     }
-    if (target) {
-      lastNavigatedPage.current = externalPage;
+    if (target && lastNavigatedHref.current !== target.href) {
+      lastNavigatedHref.current = target.href;
       try {
         renditionRef.current.display(target.href);
       } catch (err) {
@@ -166,22 +173,34 @@ export function EPUBReader({
     }
   }, [externalPage, chapterMap]);
 
-  // Scroll a just-highlighted paragraph into view so the EPUB follows the
-  // audio. Only scrolls when the element is meaningfully off-screen, so we
-  // don't fight the reader with a re-center on every 4×/sec timeupdate while
-  // the paragraph is already comfortably visible. Centered vertically.
-  function scrollFollow(el: Element, win: Window) {
+  // Follow the audio in PAGINATED mode by flipping to the page that contains
+  // the just-highlighted paragraph — the EPUB analogue of the PDF advancing
+  // pages. We only navigate when the element is NOT already on the visible
+  // page, so consecutive paragraphs on the same page don't cause a re-flip
+  // on every timeupdate (which would feel jittery and fight the reader).
+  //
+  // Visibility in a column layout: the current page occupies x in
+  // [0, innerWidth). Content on the next page sits at x >= innerWidth; content
+  // already read sits at x <= 0. So the element is on-screen iff its box
+  // overlaps [0, innerWidth).
+  function pageFollow(
+    el: Element,
+    contents: { window: Window; cfiFromNode?: (n: Node) => string },
+  ) {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
     try {
       const rect = (el as HTMLElement).getBoundingClientRect();
-      const vh = win.innerHeight || 0;
-      if (vh === 0) return;
-      // "Comfortable" band = middle 60% of the viewport. If the paragraph's
-      // top is already inside it, leave the scroll alone.
-      const topInBand = rect.top >= vh * 0.2 && rect.top <= vh * 0.8;
-      if (topInBand) return;
-      (el as HTMLElement).scrollIntoView({ block: "center", behavior: "smooth" });
+      const w = contents.window.innerWidth || 0;
+      const onCurrentPage = rect.right > 2 && rect.left < w - 2;
+      if (onCurrentPage) return; // already visible — don't disturb the page
+      // Build a CFI for the element and navigate to it. display() within the
+      // same chapter just shifts the column offset (no DOM rebuild), so the
+      // highlight class we set stays put.
+      const cfi = contents.cfiFromNode?.(el);
+      if (cfi) void rendition.display(cfi);
     } catch {
-      /* iframe not ready / cross-origin guard — ignore */
+      /* iframe not ready / CFI failure — ignore, highlight still applied */
     }
   }
   useEffect(() => {
@@ -190,6 +209,7 @@ export function EPUBReader({
       const contents = renditionRef.current.getContents() as unknown as Array<{
         document: Document;
         window: Window;
+        cfiFromNode?: (n: Node) => string;
       }>;
       for (const c of contents) {
         if (!c || !c.document) continue;
@@ -203,8 +223,7 @@ export function EPUBReader({
           const matches = c.document.querySelectorAll(selector);
           if (matches.length > 0) {
             matches.forEach((el) => el.classList.add("voice-highlight"));
-            // Follow: bring the narrated paragraph into view.
-            scrollFollow(matches[0], c.window);
+            pageFollow(matches[0], c);
             continue;
           }
           // Paragraph not found in this chapter — try the looser page-level match
@@ -214,7 +233,7 @@ export function EPUBReader({
             `[data-source-page="${currentReadingPage}"]`,
           );
           pageMatches.forEach((el) => el.classList.add("voice-highlight"));
-          if (pageMatches.length > 0) scrollFollow(pageMatches[0], c.window);
+          if (pageMatches.length > 0) pageFollow(pageMatches[0], c);
         }
       }
     } catch (err) {
@@ -330,6 +349,7 @@ export function EPUBReader({
             const contents = rendition.getContents() as unknown as Array<{
               document: Document;
               window: Window;
+              cfiFromNode?: (n: Node) => string;
             }>;
             for (const c of contents) {
               if (!c || !c.document) continue;
@@ -341,7 +361,7 @@ export function EPUBReader({
                 const matches = c.document.querySelectorAll(sel);
                 if (matches.length > 0) {
                   matches.forEach((el) => el.classList.add("voice-highlight"));
-                  scrollFollow(matches[0], c.window);
+                  pageFollow(matches[0], c);
                   continue;
                 }
               }
@@ -350,7 +370,7 @@ export function EPUBReader({
                   `[data-source-page="${pageTarget}"]`,
                 );
                 pm.forEach((el) => el.classList.add("voice-highlight"));
-                if (pm.length > 0) scrollFollow(pm[0], c.window);
+                if (pm.length > 0) pageFollow(pm[0], c);
               }
             }
           } catch {}
@@ -474,14 +494,6 @@ export function EPUBReader({
         locationChanged={handleLocationChanged}
         getRendition={getRendition}
         epubInitOptions={{ openAs: "epub" }}
-        epubOptions={{
-          // Scrolled flow (vertical continuous) instead of paginated columns.
-          // This is what lets the reader smooth-scroll the currently-narrated
-          // paragraph into view so the EPUB follows the audio the way the PDF
-          // does — scrollIntoView is reliable in a scroll container, whereas
-          // flipping to the right column-page in paginated mode is fragile.
-          flow: "scrolled-doc",
-        }}
       />
       {pct !== null && (
         <div className="pointer-events-none absolute bottom-2 right-3 rounded-full bg-ink-900/70 px-2.5 py-0.5 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-parchment-50">
