@@ -114,25 +114,16 @@ export function PDFReader({
   const [page, setPage] = useState<number>(initialPage ?? 1);
   // The base width = the container's measured CSS pixel width. Scale multiplies it.
   const [containerWidth, setContainerWidth] = useState<number>(800);
-  const [scale, setScale] = useState(() => {
-    // 9r: on first mount, pick an initial scale that fits the PDF page to
-    // the viewport width on narrow (mobile) screens. Without this, a US
-    // Letter page (~612px natural width) at 1.0 scale overflows horizontally
-    // on a 360px phone, forcing horizontal scroll on every page. After
-    // mount the user can still zoom freely with the ± buttons.
-    if (typeof window === "undefined") return 1;
-    const PDF_NATURAL_WIDTH = 612; // US Letter at 72dpi; A4 is ~595, close enough
-    // The reader page wraps PDFReader in px-3 on mobile / px-6 on sm+
-    // (= 24px or 48px combined horizontal padding). Use 24 for the mobile
-    // path here — we only auto-fit when below 640px anyway, so the smaller
-    // padding applies.
-    const usable = window.innerWidth - 24;
-    if (usable < PDF_NATURAL_WIDTH) {
-      // Clamp to 0.5 so very small viewports don't produce illegibly tiny text.
-      return Math.max(0.5, usable / PDF_NATURAL_WIDTH);
-    }
-    return 1;
-  });
+  // Zoom factor relative to the measured container width. The page is
+  // rendered at width = containerWidth * scale (see renderWidth below), so
+  // scale = 1.0 means "fill the available width" — true fit-to-width on every
+  // device. The ± buttons adjust from here.
+  //
+  // (Phase 9w fix: the previous initializer computed a fraction against a
+  // 612px "natural width", but since scale multiplies the CONTAINER width,
+  // that fraction rendered the page at ~55% of the screen — tiny and hard to
+  // read on mobile. 1.0 is the correct fit-to-width default.)
+  const [scale, setScale] = useState(1);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showToolbar, setShowToolbar] = useState(true);
   const [showHint, setShowHint] = useState(false);

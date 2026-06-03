@@ -62,6 +62,11 @@ export function EPUBReader({
     return 95;
   });
   const [chapterTitle, setChapterTitle] = useState<string>("");
+  // Flips true on the first "rendered" event. Used as a highlight-effect
+  // dependency so that if audio is already mid-paragraph when the EPUB mounts
+  // (e.g. user switches to the EPUB tab while listening), the highlight runs
+  // as soon as the iframe content exists — not only on the next paragraph.
+  const [renditionReady, setRenditionReady] = useState(0);
 
   const saver = useMemo(
     () => makeDebouncedSaver(userId, bookId, 1500),
@@ -205,14 +210,18 @@ export function EPUBReader({
   }
   useEffect(() => {
     if (!renditionRef.current) return;
+    if (currentReadingPage == null && !currentReadingParagraph) return;
     try {
       const contents = renditionRef.current.getContents() as unknown as Array<{
         document: Document;
         window: Window;
         cfiFromNode?: (n: Node) => string;
       }>;
+      let matched = false;
+      let anchorCount = 0;
       for (const c of contents) {
         if (!c || !c.document) continue;
+        anchorCount += c.document.querySelectorAll("[data-source-page]").length;
         // Always clear previous highlights first
         c.document
           .querySelectorAll(".voice-highlight")
@@ -224,23 +233,42 @@ export function EPUBReader({
           if (matches.length > 0) {
             matches.forEach((el) => el.classList.add("voice-highlight"));
             pageFollow(matches[0], c);
+            matched = true;
             continue;
           }
-          // Paragraph not found in this chapter — try the looser page-level match
         }
         if (currentReadingPage != null) {
           const pageMatches = c.document.querySelectorAll(
             `[data-source-page="${currentReadingPage}"]`,
           );
-          pageMatches.forEach((el) => el.classList.add("voice-highlight"));
-          if (pageMatches.length > 0) pageFollow(pageMatches[0], c);
+          if (pageMatches.length > 0) {
+            pageMatches.forEach((el) => el.classList.add("voice-highlight"));
+            pageFollow(pageMatches[0], c);
+            matched = true;
+          }
         }
       }
+      // Diagnostic (9w): if we have a narration target but found no match,
+      // report what the rendered content actually contains. anchorCount === 0
+      // means this EPUB has no page anchors at all → it predates the current
+      // converter and needs a Re-convert. anchorCount > 0 but no match means
+      // the narrated page isn't in the currently-rendered chapter yet.
+      if (!matched) {
+        console.warn(
+          `[epub-sync] no highlight match. narratedPage=${currentReadingPage} para=${
+            currentReadingParagraph
+              ? `${currentReadingParagraph.page}/${currentReadingParagraph.paragraphIndex}`
+              : "none"
+          } anchorsInView=${anchorCount}` +
+            (anchorCount === 0
+              ? " → this EPUB has no page anchors; Re-convert the book."
+              : " → narrated page not in the rendered chapter yet."),
+        );
+      }
     } catch (err) {
-      // Iframe might not be ready yet — safe to ignore
       console.warn("[epub] highlight update failed", err);
     }
-  }, [currentReadingPage, currentReadingParagraph]);
+  }, [currentReadingPage, currentReadingParagraph, renditionReady]);
 
   const getRendition: IReactReaderProps["getRendition"] = (rendition) => {
     renditionRef.current = rendition;
@@ -333,6 +361,8 @@ export function EPUBReader({
     // Track current chapter from the spine, AND re-apply voice highlight
     // since each render swaps out the iframe contents (clearing prior classes)
     rendition.on("rendered", (section: { href?: string }) => {
+      // Signal the highlight effect that content is now available to query.
+      setRenditionReady((n) => n + 1);
       try {
         const nav = book.navigation;
         if (nav && section.href) {
