@@ -45,5 +45,20 @@ service cloud.firestore {
       allow read, write: if isSignedIn() && progressId.matches(request.auth.uid + "_.*");
       allow read: if isAdmin();
     }
+
+    // BOOK NOTES — a member's private notebook (Phase 9y). One doc per note.
+    // Owner-scoped by the user_id field: a member may only read/write notes
+    // they own, and may not reassign a note to someone else. Admins may read
+    // (e.g. for support) but not write.
+    match /book_notes/{noteId} {
+      allow read: if isSignedIn()
+                  && (resource.data.user_id == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+                    && request.resource.data.user_id == request.auth.uid;
+      allow update: if isSignedIn()
+                    && resource.data.user_id == request.auth.uid
+                    && request.resource.data.user_id == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.user_id == request.auth.uid;
+    }
   }
 }

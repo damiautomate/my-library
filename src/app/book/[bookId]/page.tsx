@@ -15,6 +15,7 @@ import {
   Play,
   CheckCircle2,
   Mic,
+  NotebookPen,
   X as XIcon,
   Star,
 } from "lucide-react";
@@ -224,6 +225,12 @@ function BookDetailContent() {
                 </Button>
               </Link>
             )}
+            <Link href={`/book/${book.id}/notes`}>
+              <Button variant="outline">
+                <NotebookPen size={14} />
+                Notebook
+              </Button>
+            </Link>
             {book.pdf_url && (
               <DownloadLink bookId={book.id} kind="pdf" label="PDF" />
             )}
@@ -609,6 +616,13 @@ function ReaderNotesSection({
           Reader's notes
         </h2>
         <p className="mt-1 text-xs text-ink-500">Private to you</p>
+        <Link
+          href={`/book/${bookId}/notes`}
+          className="mt-3 inline-flex items-center gap-1.5 text-xs text-oxblood-700 underline-offset-4 hover:underline"
+        >
+          <NotebookPen size={12} />
+          Open full notebook
+        </Link>
       </div>
       <div className="md:col-span-9 space-y-6">
         {/* Notes */}

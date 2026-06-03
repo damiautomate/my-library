@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams, notFound } from "next/navigation";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { ArrowLeft, BookOpen, FileText, Headphones, Mic } from "lucide-react";
+import { ArrowLeft, BookOpen, FileText, Headphones, Mic, NotebookPen } from "lucide-react";
 import { AuthGuard } from "@/components/library/AuthGuard";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/contexts/AuthContext";
@@ -337,17 +337,27 @@ function BackBar({
         <ArrowLeft size={14} />
         <span className="font-display text-base">{title}</span>
       </Link>
-      {pct !== null && pct !== undefined && (
-        <div className="flex items-center gap-2">
-          <div className="h-1 w-40 overflow-hidden rounded-full bg-parchment-200">
-            <div
-              className="h-full bg-oxblood-600"
-              style={{ width: `${pct}%` }}
-            />
+      <div className="flex items-center gap-3">
+        {pct !== null && pct !== undefined && (
+          <div className="flex items-center gap-2">
+            <div className="h-1 w-28 overflow-hidden rounded-full bg-parchment-200 sm:w-40">
+              <div
+                className="h-full bg-oxblood-600"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="font-mono text-xs text-ink-700">{pct}%</span>
           </div>
-          <span className="font-mono text-xs text-ink-700">{pct}%</span>
-        </div>
-      )}
+        )}
+        <Link
+          href={`/book/${bookId}/notes`}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-ink-500/25 bg-parchment-50 px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-ink-700 hover:bg-parchment-100"
+          aria-label="Open notebook"
+        >
+          <NotebookPen size={12} />
+          <span className="hidden sm:inline">Notes</span>
+        </Link>
+      </div>
     </div>
   );
 }

@@ -305,3 +305,98 @@ export interface ReadingProgressDoc {
   rating?: number;
   highlights?: Highlight[];
 }
+
+// ============================================================
+// NOTEBOOK  (Phase 9y — reading notes & highlights)
+// ============================================================
+//
+// A member's notebook for a book is a set of independent `book_notes`
+// documents — one per note. A highlight and a note are the SAME entity: a
+// Note with an `anchor`. A bare highlight is just a note with a color, a
+// captured `quote`, and an empty `body`; "send to notes / add text" only
+// fills in the body. This keeps ONE source of truth (cf. paragraphs.ts):
+// the reader renders highlight-notes on the page, the notebook lists the
+// same notes — never two systems to reconcile.
+
+/** The kind of note. Doubles as the "segment by type" grouping in the
+ *  notebook. Catalog metadata (label, color, hint) lives in `notes.ts`. */
+export type NoteType =
+  | "highlight"
+  | "insight"
+  | "reflection"
+  | "question"
+  | "action"
+  | "exercise"
+  | "vocabulary"
+  | "summary"
+  | "meditation";
+
+/** Where the note was captured. "manual" = typed straight into the notebook
+ *  with no reader selection behind it. */
+export type NoteMedium = "pdf" | "epub" | "audio" | "manual";
+
+/** A highlight rectangle in NORMALIZED page coordinates (each value 0..1 of
+ *  the PDF page's natural size). Scale-independent, so it redraws correctly at
+ *  any zoom. Populated in Phase B (PDF highlighting); null until then. */
+export interface NoteRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Everything needed to (a) group the note under the right chapter/segment,
+ * (b) jump back to its exact source, and (c) re-render its highlight. Fields
+ * are populated according to the medium — a manual note carries only the
+ * chapter; a PDF highlight adds page + rects; an EPUB highlight adds the CFI
+ * range; an audio note adds the timestamp.
+ */
+export interface NoteAnchor {
+  medium: NoteMedium;
+  /** Index into the book's `epub_chapter_map`; null = front matter / unfiled. */
+  chapter_index: number | null;
+  /** Denormalized chapter title for display/export without re-deriving. */
+  chapter_title: string | null;
+  /** Source PDF page (1-indexed). */
+  page: number | null;
+  /** Paragraph index on that page, per paragraphs.ts. Used for in-book order. */
+  paragraph_index: number | null;
+  /** EPUB reading location (single point). */
+  cfi: string | null;
+  /** EPUB highlight range — what epub.js annotates. Phase D. */
+  cfi_range: string | null;
+  /** Audio position in seconds (within the whole book's narration). Phase C. */
+  audio_seconds: number | null;
+  /** PDF highlight rectangles, normalized. Phase B. */
+  rects: NoteRect[] | null;
+}
+
+/** A `book_notes` Firestore document. */
+export interface NoteDoc {
+  user_id: string;
+  book_id: string;
+  /** Denormalized `${user_id}_${book_id}`. Lets the notebook load a book's
+   *  notes with a SINGLE equality filter — no composite index required. */
+  user_book: string;
+  type: NoteType;
+  /** Highlight color (hex). null = no visual highlight (plain note). */
+  color: string | null;
+  /** Captured passage. Empty when the note isn't anchored to a quote. */
+  quote: string;
+  /** The member's own words (Markdown). Empty for a bare highlight. */
+  body: string;
+  /** Exercise checkbox state. null for non-exercise notes. */
+  done: boolean | null;
+  /** Favourite / "worth keeping" flag. */
+  starred: boolean;
+  anchor: NoteAnchor;
+  /** Manual ordering within a chapter. Defaults to creation time so new notes
+   *  land at the end of their chapter until the member reorders them. */
+  order: number;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+/** A note with its Firestore document ID attached. */
+export type Note = NoteDoc & { id: string };
