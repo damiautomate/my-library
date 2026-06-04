@@ -13,6 +13,7 @@ import {
   NOTE_TYPE_META,
   NOTE_TYPE_ORDER,
   updateNote,
+  type NoteSeed,
 } from "@/lib/notes";
 import type { Book, Note, NoteType } from "@/lib/types";
 import { NOTE_TYPE_ICON } from "./noteTypeIcons";
@@ -26,6 +27,8 @@ interface NoteEditorProps {
   editing: Note | null;
   /** Chapter to pre-select for a NEW note (auto-detected from reading pos). */
   defaultChapterIndex: number | null;
+  /** Pre-fill for a NEW note started from a reader (e.g. "note this moment"). */
+  seed?: NoteSeed | null;
 }
 
 export function NoteEditor({
@@ -35,6 +38,7 @@ export function NoteEditor({
   userId,
   editing,
   defaultChapterIndex,
+  seed,
 }: NoteEditorProps) {
   const options = useMemo(() => chapterOptions(book.epub_chapter_map), [book.epub_chapter_map]);
 
@@ -57,14 +61,21 @@ export function NoteEditor({
       setColor(editing.color);
       setDone(editing.done === true);
     } else {
-      setType("insight");
-      setChapterKey(defaultChapterIndex == null ? "" : String(defaultChapterIndex));
-      setBody("");
-      setQuote("");
-      setColor(null);
+      setType(seed?.type ?? "insight");
+      const seededChapter = seed?.anchor?.chapter_index;
+      setChapterKey(
+        seededChapter != null
+          ? String(seededChapter)
+          : defaultChapterIndex == null
+            ? ""
+            : String(defaultChapterIndex),
+      );
+      setBody(seed?.body ?? "");
+      setQuote(seed?.quote ?? "");
+      setColor(seed?.color ?? null);
       setDone(false);
     }
-  }, [open, editing, defaultChapterIndex]);
+  }, [open, editing, defaultChapterIndex, seed]);
 
   const canSave = body.trim().length > 0 || quote.trim().length > 0;
 
@@ -93,13 +104,18 @@ export function NoteEditor({
           },
         });
       } else {
+        const baseAnchor = seed?.anchor ?? manualAnchor(chapterIndex, chapterTitle);
         await createNote(userId, book.id, {
           type,
           body: body.trim(),
           quote: quote.trim(),
           color,
           done: isExercise ? done : null,
-          anchor: manualAnchor(chapterIndex, chapterTitle),
+          anchor: {
+            ...baseAnchor,
+            chapter_index: chapterIndex,
+            chapter_title: chapterTitle,
+          },
         });
       }
       onClose();

@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { NoteCard } from "./NoteCard";
 import { NoteEditor } from "./NoteEditor";
+import { NotebookAudio } from "./NotebookAudio";
 import { NOTE_TYPE_ICON } from "./noteTypeIcons";
 import {
   chapterForPageIndex,
@@ -21,6 +22,7 @@ import {
   toggleNoteDone,
   updateNote,
   watchBookNotes,
+  type NoteSeed,
 } from "@/lib/notes";
 import { getProgress } from "@/lib/progress";
 import type { Book, Note } from "@/lib/types";
@@ -32,6 +34,7 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
   const [view, setView] = useState<View>("chapter");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<Note | null>(null);
+  const [seed, setSeed] = useState<NoteSeed | null>(null);
   const [defaultChapterIndex, setDefaultChapterIndex] = useState<number | null>(null);
 
   // Live notes.
@@ -64,10 +67,17 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
 
   function openNew() {
     setEditing(null);
+    setSeed(null);
     setEditorOpen(true);
   }
   function openEdit(note: Note) {
     setEditing(note);
+    setSeed(null);
+    setEditorOpen(true);
+  }
+  function openSeeded(s: NoteSeed) {
+    setEditing(null);
+    setSeed(s);
     setEditorOpen(true);
   }
 
@@ -119,6 +129,13 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
           )}
         </p>
       </header>
+
+      {/* Listen-while-you-annotate (books with narration) */}
+      {(book.voice_segments?.length ?? 0) > 0 && (
+        <div className="mt-5">
+          <NotebookAudio book={book} userId={userId} onNoteThisMoment={openSeeded} />
+        </div>
+      )}
 
       {/* Controls */}
       <div className="mt-5 flex items-center justify-between gap-3">
@@ -189,6 +206,7 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
         userId={userId}
         editing={editing}
         defaultChapterIndex={defaultChapterIndex}
+        seed={seed}
       />
     </main>
   );

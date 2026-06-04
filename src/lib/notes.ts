@@ -157,6 +157,18 @@ export function manualAnchor(
   return { ...emptyAnchor("manual"), chapter_index: chapterIndex, chapter_title: chapterTitle };
 }
 
+/**
+ * Pre-fill for the editor when a note is started from a reader (e.g. "note
+ * this moment" while listening). Any field may be omitted.
+ */
+export interface NoteSeed {
+  type?: NoteType;
+  quote?: string;
+  body?: string;
+  color?: string | null;
+  anchor?: NoteAnchor;
+}
+
 // ============================================================
 // ACCESS
 // ============================================================
