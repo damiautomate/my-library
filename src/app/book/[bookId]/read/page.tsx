@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams, notFound } from "next/navigation";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -12,10 +12,7 @@ import { getBook } from "@/lib/books";
 import { proxyFileUrl } from "@/lib/cloudinary";
 import { getProgress } from "@/lib/progress";
 import type { Book, ReadingProgressDoc } from "@/lib/types";
-import type {
-  NarratingParagraph,
-  VoiceReaderHandle,
-} from "@/components/readers/VoiceReader";
+import { useBookAudio } from "@/components/audio/BookAudioProvider";
 
 // react-pdf and react-reader touch window/Worker APIs; ensure they only load
 // in the browser by dynamically importing with ssr: false.
@@ -27,11 +24,6 @@ const PDFReader = dynamic(
 const EPUBReader = dynamic(
   () => import("@/components/readers/EPUBReader").then((m) => m.EPUBReader),
   { ssr: false, loading: () => <ReaderSkeleton kind="EPUB" /> },
-);
-
-const VoiceReader = dynamic(
-  () => import("@/components/readers/VoiceReader").then((m) => m.VoiceReader),
-  { ssr: false, loading: () => <ReaderSkeleton kind="voice" /> },
 );
 
 const AudioPlayer = dynamic(
@@ -74,22 +66,10 @@ function ReadContent() {
   // them. Keeps progress in sync across formats without re-fetching from
   // Firestore on every tab switch.
   const [livePage, setLivePage] = useState<number | null>(null);
-  // The page currently being narrated by voice — separate from livePage so
-  // the user can read ahead in PDF/EPUB while voice continues at its own pace,
-  // and the EPUB still highlights the paragraph being narrated wherever the
-  // user is.
-  const [voicePage, setVoicePage] = useState<number | null>(null);
-  // The specific paragraph currently being narrated. Lets PDF/EPUB highlight
-  // ONE paragraph at a time instead of a whole page. Cleared on pause.
-  const [voiceParagraph, setVoiceParagraph] =
-    useState<NarratingParagraph | null>(null);
-  // Whether audio is actively playing — drives PDF mini-player icon state.
-  const [voicePlaying, setVoicePlaying] = useState(false);
-  // Imperative control handle to drive the VoiceReader's audio from elsewhere
-  // (e.g. PDF toolbar mini-player). Populated by VoiceReader on mount via the
-  // onControlsReady callback. We use a ref instead of state so toggling the
-  // handle doesn't trigger re-renders.
-  const voiceControlsRef = useRef<VoiceReaderHandle | null>(null);
+  // The shared, per-book audio engine (mounted in the book layout). It lives
+  // across reader ↔ notebook navigation, so playback never stops and every
+  // page reads the same position.
+  const audio = useBookAudio();
   const [proxyUrls, setProxyUrls] = useState<Partial<Record<Mode, string>>>({});
 
   // Resolve same-origin proxy URLs for each available format. Recomputed any
@@ -123,28 +103,6 @@ function ReadContent() {
       setLivePage(p?.current_page ?? null);
     });
   }, [firebaseUser, bookId]);
-
-  // Stable callbacks for the voice control bridge. MUST be declared before any
-  // early returns to satisfy the Rules of Hooks — React requires the same
-  // number of hooks in the same order on every render, and the conditional
-  // returns below would skip these on initial loading renders, then run them
-  // on subsequent renders once book is loaded, causing "Rendered more hooks
-  // than during the previous render" crashes.
-  const handleVoiceControlsReady = useCallback(
-    (h: VoiceReaderHandle | null) => {
-      voiceControlsRef.current = h;
-    },
-    [],
-  );
-  const handleVoiceTogglePlay = useCallback(() => {
-    void voiceControlsRef.current?.togglePlay();
-  }, []);
-  const handleVoiceNudgeBack = useCallback(() => {
-    voiceControlsRef.current?.nudgeBackward(10);
-  }, []);
-  const handleVoiceNudgeForward = useCallback(() => {
-    voiceControlsRef.current?.nudgeForward(10);
-  }, []);
 
   if (book === undefined) {
     return (
@@ -198,9 +156,12 @@ function ReadContent() {
           {available.map((m) => (
             <button
               key={m}
-              onClick={() =>
-                router.replace(`/book/${bookId}/read?mode=${m}`, { scroll: false })
-              }
+              onClick={() => {
+                if (m === "voice") audio.setExpanded(true);
+                router.replace(`/book/${bookId}/read?mode=${m}`, {
+                  scroll: false,
+                });
+              }}
               className={
                 "flex items-center gap-1.5 rounded-full border px-2.5 py-1 " +
                 (mode === m
@@ -228,14 +189,17 @@ function ReadContent() {
             userId={firebaseUser.uid}
             bookId={book.id}
             initialPage={livePage ?? progress?.current_page}
-            currentReadingPage={voicePage}
-            currentReadingParagraph={voiceParagraph}
-            voicePlaying={voicePlaying}
-            onVoiceTogglePlay={hasVoice ? handleVoiceTogglePlay : undefined}
-            onVoiceNudgeBackward={hasVoice ? handleVoiceNudgeBack : undefined}
-            onVoiceNudgeForward={hasVoice ? handleVoiceNudgeForward : undefined}
+            currentReadingPage={audio.narratingPage}
+            currentReadingParagraph={audio.narratingParagraph}
+            voicePlaying={audio.playing}
+            onVoiceTogglePlay={hasVoice ? audio.toggle : undefined}
+            onVoiceNudgeBackward={hasVoice ? () => audio.nudge(-10) : undefined}
+            onVoiceNudgeForward={hasVoice ? () => audio.nudge(10) : undefined}
             onPercentChange={setLivePct}
-            onPageChange={setLivePage}
+            onPageChange={(p) => {
+              setLivePage(p);
+              audio.setExternalPage(p);
+            }}
             chapterMap={book.epub_chapter_map}
           />
         )}
@@ -247,39 +211,31 @@ function ReadContent() {
             initialCfi={progress?.current_cfi}
             chapterMap={book.epub_chapter_map}
             externalPage={livePage}
-            currentReadingPage={voicePage}
-            currentReadingParagraph={voiceParagraph}
+            currentReadingPage={audio.narratingPage}
+            currentReadingParagraph={audio.narratingParagraph}
             onPercentChange={setLivePct}
           />
         )}
 
-        {/* Voice reader: ALWAYS mounted when voice is available, just hidden
-            with CSS when the user is on a different tab. This is the only way
-            to keep audio playing across tab switches — unmounting destroys
-            the <audio> element and stops playback. The user can continue
-            listening while reading the PDF or EPUB in parallel. */}
-        {book.voice_segments && book.voice_segments.length > 0 && (
-          <div style={{ display: mode === "voice" ? "block" : "none" }}>
-            <VoiceReader
-              segments={book.voice_segments}
-              userId={firebaseUser.uid}
-              bookId={book.id}
-              initialPage={livePage ?? progress?.current_page}
-              initialSegmentIndex={progress?.current_voice_segment_index}
-              initialSeconds={progress?.current_voice_seconds}
-              externalPage={mode === "voice" ? undefined : livePage}
-              totalPages={book.page_count ?? undefined}
-              chapterMap={book.epub_chapter_map}
-              bookTitle={book.title}
-              bookAuthors={book.authors}
-              coverUrl={book.cover_url}
-              onPercentChange={setLivePct}
-              onPageChange={setLivePage}
-              onNarratingPage={setVoicePage}
-              onNarratingParagraph={setVoiceParagraph}
-              onPlayingChange={setVoicePlaying}
-              onControlsReady={handleVoiceControlsReady}
-            />
+        {/* Narration is played by the shared dock at the bottom of the screen,
+            so it keeps playing across the reader and the notebook. The voice
+            tab points the member to it. */}
+        {mode === "voice" && (
+          <div className="ml-card mt-2 px-6 py-12 text-center">
+            <p className="font-display text-xl text-ink-800">
+              {hasVoice
+                ? "Narration plays in the dock below."
+                : "No narration for this book yet."}
+            </p>
+            {hasVoice && (
+              <button
+                type="button"
+                onClick={() => audio.setExpanded(true)}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-sm border border-oxblood-700 bg-oxblood-600 px-4 py-2 text-sm font-medium text-parchment-50 hover:bg-oxblood-700"
+              >
+                Open the player
+              </button>
+            )}
           </div>
         )}
 

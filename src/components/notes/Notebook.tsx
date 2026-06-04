@@ -133,7 +133,7 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
       {/* Listen-while-you-annotate (books with narration) */}
       {(book.voice_segments?.length ?? 0) > 0 && (
         <div className="mt-5">
-          <NotebookAudio book={book} userId={userId} onNoteThisMoment={openSeeded} />
+          <NotebookAudio onNoteThisMoment={openSeeded} />
         </div>
       )}
 
