@@ -195,6 +195,7 @@ function ReadContent() {
             onVoiceTogglePlay={hasVoice ? audio.toggle : undefined}
             onVoiceNudgeBackward={hasVoice ? () => audio.nudge(-10) : undefined}
             onVoiceNudgeForward={hasVoice ? () => audio.nudge(10) : undefined}
+            onPlayFromPage={hasVoice ? audio.playFromPage : undefined}
             onPercentChange={setLivePct}
             onPageChange={(p) => {
               setLivePage(p);

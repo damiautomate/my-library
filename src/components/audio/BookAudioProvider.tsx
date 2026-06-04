@@ -12,6 +12,8 @@ import {
 import dynamic from "next/dynamic";
 import {
   ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
   ChevronUp,
   FastForward,
   Headphones,
@@ -49,6 +51,10 @@ interface BookAudioValue {
   toggle: () => void;
   /** Positive = forward, negative = back. */
   nudge: (seconds: number) => void;
+  /** Step to previous (-1) or next (+1) paragraph. */
+  stepParagraph: (dir: 1 | -1) => void;
+  /** Start narration from the top of a source page (tap-to-play). */
+  playFromPage: (page: number) => void;
   /** Tell the engine where the member is reading (PDF/EPUB), so that when
    *  paused, playback realigns to follow them. Ignored while playing. */
   setExternalPage: (page: number | null) => void;
@@ -67,6 +73,8 @@ const inert: BookAudioValue = {
   page: null,
   toggle: () => {},
   nudge: () => {},
+  stepParagraph: () => {},
+  playFromPage: () => {},
   setExternalPage: () => {},
   expanded: false,
   setExpanded: () => {},
@@ -155,6 +163,12 @@ export function BookAudioProvider({
     if (s < 0) controlsRef.current?.nudgeBackward(-s);
     else controlsRef.current?.nudgeForward(s);
   }, []);
+  const stepParagraph = useCallback((d: 1 | -1) => {
+    controlsRef.current?.stepParagraph(d);
+  }, []);
+  const playFromPage = useCallback((p: number) => {
+    void controlsRef.current?.playFromPage(p);
+  }, []);
   const setExternalPage = useCallback(
     (p: number | null) => setExternalPageState(p),
     [],
@@ -184,6 +198,8 @@ export function BookAudioProvider({
       page,
       toggle,
       nudge,
+      stepParagraph,
+      playFromPage,
       setExternalPage,
       expanded,
       setExpanded,
@@ -198,6 +214,8 @@ export function BookAudioProvider({
       page,
       toggle,
       nudge,
+      stepParagraph,
+      playFromPage,
       setExternalPage,
       expanded,
       currentSeed,
@@ -248,6 +266,25 @@ export function BookAudioProvider({
                 className="inline-flex items-center gap-1 rounded-sm border border-ink-500/20 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-[0.1em] text-ink-700 hover:bg-parchment-100"
               >
                 30 <FastForward size={12} />
+              </button>
+              <span className="mx-0.5 hidden h-5 w-px bg-ink-500/15 sm:block" />
+              <button
+                type="button"
+                onClick={() => stepParagraph(-1)}
+                aria-label="Previous paragraph"
+                title="Previous paragraph"
+                className="shrink-0 rounded-sm border border-ink-500/20 p-1 text-ink-700 hover:bg-parchment-100"
+              >
+                <ChevronsLeft size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => stepParagraph(1)}
+                aria-label="Next paragraph"
+                title="Next paragraph"
+                className="shrink-0 rounded-sm border border-ink-500/20 p-1 text-ink-700 hover:bg-parchment-100"
+              >
+                <ChevronsRight size={15} />
               </button>
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
                 <Headphones size={12} className="shrink-0 text-ink-500" />

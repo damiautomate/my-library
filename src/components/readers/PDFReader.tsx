@@ -27,6 +27,7 @@ import {
   PenLine,
   Play,
   Rewind,
+  Trash2,
   X as XIcon,
   ZoomIn,
   ZoomOut,
@@ -35,6 +36,7 @@ import { makeDebouncedSaver } from "@/lib/progress";
 import {
   chapterForPageIndex,
   createNote,
+  deleteNote,
   emptyAnchor,
   HIGHLIGHT_COLORS,
   watchBookNotes,
@@ -83,6 +85,9 @@ interface PDFReaderProps {
   onVoiceTogglePlay?: () => void;
   onVoiceNudgeBackward?: () => void;
   onVoiceNudgeForward?: () => void;
+  /** Start narration from a given page (tap-to-play). When provided, tapping a
+   *  paragraph offers a "Play from here" action. */
+  onPlayFromPage?: (page: number) => void;
   /** Chapter map, so a highlight captured on page N is filed under the right
    *  chapter in the notebook (Phase 9z). */
   chapterMap?: EpubChapterMapping[];
@@ -108,6 +113,53 @@ const MIN_SCALE = 0.5;
 const MAX_SCALE = 3.0;
 const SCALE_STEP = 0.1;
 
+/**
+ * Convert a selection Range into normalised per-line rects (fractions of the
+ * page box). Hardened against the "over-highlight" failure mode where the
+ * browser returns a tall line-box / container rect that visually covers
+ * several lines: we clamp to the page, drop block-height rects, and de-dupe.
+ */
+function normalizeSelectionRects(range: Range, pageRect: DOMRect): NoteRect[] {
+  const out: NoteRect[] = [];
+  for (const r of Array.from(range.getClientRects())) {
+    if (r.width <= 1 || r.height <= 1) continue;
+    let x = (r.left - pageRect.left) / pageRect.width;
+    let y = (r.top - pageRect.top) / pageRect.height;
+    let w = r.width / pageRect.width;
+    let h = r.height / pageRect.height;
+    // Reject rects clearly outside the page (selection handles, margins).
+    if (x < -0.05 || x > 1.05 || y < -0.05 || y > 1.05) continue;
+    // Clamp into the page box.
+    if (x < 0) {
+      w += x;
+      x = 0;
+    }
+    if (y < 0) {
+      h += y;
+      y = 0;
+    }
+    if (x + w > 1) w = 1 - x;
+    if (y + h > 1) h = 1 - y;
+    // A line of text is short. Anything tall is a block/line-box rect that
+    // would over-highlight — skip it. Anything too thin is noise.
+    if (h < 0.004 || h > 0.1 || w < 0.004) continue;
+    // De-dupe near-identical rects (avoids stacked multiply darkening).
+    if (
+      out.some(
+        (o) =>
+          Math.abs(o.x - x) < 0.004 &&
+          Math.abs(o.y - y) < 0.006 &&
+          Math.abs(o.w - w) < 0.01 &&
+          Math.abs(o.h - h) < 0.01,
+      )
+    )
+      continue;
+    out.push({ x, y, w, h });
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+
 export function PDFReader({
   url,
   userId,
@@ -121,6 +173,7 @@ export function PDFReader({
   onVoiceTogglePlay,
   onVoiceNudgeBackward,
   onVoiceNudgeForward,
+  onPlayFromPage,
   chapterMap,
 }: PDFReaderProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
@@ -612,6 +665,13 @@ export function PDFReader({
     page: number;
   } | null>(null);
   const [savedToast, setSavedToast] = useState<string | null>(null);
+  // Contextual tap menu over the page: remove a highlight, or start narration
+  // from this page. Positioned at the tap point (viewport coords).
+  const [tapMenu, setTapMenu] = useState<{
+    x: number;
+    y: number;
+    note: Note | null;
+  } | null>(null);
 
   // Live highlights for this book, so saved marks redraw on their pages.
   const [notes, setNotes] = useState<Note[]>([]);
@@ -657,17 +717,7 @@ export function PDFReader({
       }
       const range = sel.getRangeAt(0);
       const pageRect = pageEl.getBoundingClientRect();
-      const rects: NoteRect[] = Array.from(range.getClientRects())
-        .filter((r) => r.width > 1 && r.height > 1)
-        .map((r) => ({
-          x: (r.left - pageRect.left) / pageRect.width,
-          y: (r.top - pageRect.top) / pageRect.height,
-          w: r.width / pageRect.width,
-          h: r.height / pageRect.height,
-        }))
-        // Drop stray rects outside the page (selection handles, etc.).
-        .filter((r) => r.x > -0.05 && r.x < 1.05 && r.y > -0.05 && r.y < 1.05)
-        .slice(0, 80);
+      const rects = normalizeSelectionRects(range, pageRect);
       setSelection({ text, rect: range.getBoundingClientRect(), rects });
     }
     document.addEventListener("selectionchange", handleSelection);
@@ -729,6 +779,43 @@ export function PDFReader({
     if (!selection) return;
     setComposer({ text: selection.text, rects: selection.rects, page });
     clearSelection();
+  }
+
+  /**
+   * Tap on the page (not a margin nav-zone, not during a selection): if it
+   * landed on a saved highlight, offer to remove it; otherwise offer to start
+   * narration from this page. Margin taps still fall through to onPageClick.
+   */
+  function handleContentTap(e: React.MouseEvent<HTMLDivElement>) {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return; // selecting
+    const pageEl = pageWrapperRef.current?.querySelector(
+      ".react-pdf__Page",
+    ) as HTMLElement | null;
+    if (!pageEl) return;
+    const pr = pageEl.getBoundingClientRect();
+    const nx = (e.clientX - pr.left) / pr.width;
+    const ny = (e.clientY - pr.top) / pr.height;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return; // outside the page box
+    const hit = pageHighlights.find((n) =>
+      (n.anchor.rects ?? []).some(
+        (r) => nx >= r.x && nx <= r.x + r.w && ny >= r.y && ny <= r.y + r.h,
+      ),
+    );
+    if (!hit && !onPlayFromPage) return; // nothing to offer
+    setTapMenu({ x: e.clientX, y: e.clientY, note: hit ?? null });
+  }
+
+  async function removeHighlight(noteId: string) {
+    setTapMenu(null);
+    try {
+      await deleteNote(noteId);
+      setSavedToast("Highlight removed");
+    } catch (err) {
+      console.error("[pdf] removeHighlight failed", err);
+      setSavedToast("Couldn’t remove — try again");
+    }
+    setTimeout(() => setSavedToast(null), 1800);
   }
 
   // Update pageInput display when page changes
@@ -984,7 +1071,7 @@ export function PDFReader({
         style={{ touchAction: "pan-y" }}
       >
         <div className="mx-auto flex justify-center">
-          <div className="relative">
+          <div className="relative" onClick={handleContentTap}>
           <Document
             file={url}
             onLoadSuccess={(info) => {
@@ -1063,6 +1150,40 @@ export function PDFReader({
           </div>
         </div>
       </div>
+
+      {/* Contextual tap menu — remove a highlight, or play from this page */}
+      {tapMenu && (
+        <div className="fixed inset-0 z-40" onClick={() => setTapMenu(null)}>
+          <div
+            className="absolute -translate-x-1/2 -translate-y-full rounded-md border ml-hairline bg-parchment-50 p-1 shadow-paper-lg"
+            style={{ left: tapMenu.x, top: tapMenu.y - 8 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {tapMenu.note ? (
+              <button
+                type="button"
+                onClick={() => void removeHighlight(tapMenu.note!.id)}
+                className="flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm text-oxblood-700 hover:bg-oxblood-50"
+              >
+                <Trash2 size={14} /> Remove highlight
+              </button>
+            ) : (
+              onPlayFromPage && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onPlayFromPage(page);
+                    setTapMenu(null);
+                  }}
+                  className="flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm text-ink-800 hover:bg-parchment-100"
+                >
+                  <Play size={14} /> Play from here
+                </button>
+              )
+            )}
+          </div>
+        </div>
+      )}
 
       {/* First-time hint about tap zones on mobile */}
       {numPages && showHint && (

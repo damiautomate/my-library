@@ -58,6 +58,10 @@ export interface VoiceReaderHandle {
   nudgeBackward: (seconds: number) => void;
   nudgeForward: (seconds: number) => void;
   isPlaying: () => boolean;
+  /** Start narration from the top of a given source page (tap-to-play). */
+  playFromPage: (page: number) => Promise<void>;
+  /** Jump to the previous (-1) or next (+1) distinct paragraph. */
+  stepParagraph: (dir: 1 | -1) => void;
 }
 
 interface VoiceReaderProps {
@@ -303,6 +307,41 @@ function segmentForPage(segments: VoiceSegment[], page: number): number {
   // If page is beyond the last segment, return the last segment
   if (segments.length > 0 && page > segments[segments.length - 1].page_end) {
     return segments.length - 1;
+  }
+  return 0;
+}
+
+/**
+ * Distinct paragraph start times within a segment, derived from SSML mark
+ * timepoints. Sub-marks of the same paragraph collapse to one entry. Used for
+ * paragraph-by-paragraph stepping. Empty for legacy segments without marks.
+ */
+function distinctParagraphStarts(
+  segment: VoiceSegment,
+): Array<{ time: number; page: number; paragraphIndex: number }> {
+  const tps = segment.paragraph_timepoints;
+  if (!tps || tps.length === 0) return [];
+  const out: Array<{ time: number; page: number; paragraphIndex: number }> = [];
+  let lastKey = "";
+  for (const tp of tps) {
+    const p = parseMarkName(tp.markName);
+    if (!p) continue;
+    const key = `${p.page}-${p.paragraphIndex}`;
+    if (key === lastKey) continue;
+    lastKey = key;
+    out.push({ time: tp.time, page: p.page, paragraphIndex: p.paragraphIndex });
+  }
+  return out;
+}
+
+/** Time (seconds) where a source page's narration begins within a segment. */
+function pageStartTime(segment: VoiceSegment, page: number): number {
+  const tps = segment.paragraph_timepoints;
+  if (tps && tps.length > 0) {
+    for (const tp of tps) {
+      const p = parseMarkName(tp.markName);
+      if (p && p.page === page) return tp.time;
+    }
   }
   return 0;
 }
@@ -654,6 +693,122 @@ export function VoiceReader({
     [current, segIdx, segments, saver],
   );
 
+  /**
+   * Start narration from the top of a given source page. Used by tap-to-play
+   * in the PDF reader. If the page lives in the current segment we just seek;
+   * otherwise we switch segments (auto-playing once loaded).
+   */
+  const playFromPage = useCallback(
+    async (targetPage: number) => {
+      const idx = segmentForPage(segments, targetPage);
+      const seg = segments[idx];
+      if (!seg) return;
+      const startTime = pageStartTime(seg, targetPage);
+      const el = audioRef.current;
+      if (idx === segIdx && el) {
+        try {
+          el.currentTime = startTime;
+        } catch {}
+        setPosition(startTime);
+        saver.save({
+          current_voice_segment_index: idx,
+          current_voice_seconds: startTime,
+        });
+        void saver.flush();
+        setLoading(true);
+        try {
+          await el.play();
+          setPlaying(true);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setLoading(false);
+        }
+      } else {
+        // Different segment: arm the restore-on-load seek and flip to it. The
+        // segment-change effect plays automatically because we set playing.
+        initialSeekRef.current = startTime;
+        setPlaying(true);
+        setSegIdx(idx);
+        saver.save({
+          current_voice_segment_index: idx,
+          current_voice_seconds: startTime,
+        });
+        void saver.flush();
+      }
+    },
+    [segments, segIdx, saver],
+  );
+
+  /**
+   * Jump to the previous/next distinct paragraph using SSML mark timepoints.
+   * Backward within ~1.5s of a paragraph's start goes to the previous one;
+   * otherwise it restarts the current paragraph (mirrors skip-back feel).
+   * Falls back to a 15s nudge for legacy segments without timepoints.
+   */
+  const stepParagraph = useCallback(
+    (dir: 1 | -1) => {
+      const el = audioRef.current;
+      if (!el || !current) return;
+      const starts = distinctParagraphStarts(current);
+      if (starts.length === 0) {
+        if (dir > 0) nudgeForward(15);
+        else nudgeBackward(15);
+        return;
+      }
+      const seekWithin = (t: number) => {
+        try {
+          el.currentTime = t;
+        } catch {}
+        setPosition(t);
+        saver.save({
+          current_voice_segment_index: segIdx,
+          current_voice_seconds: t,
+        });
+        void saver.flush();
+      };
+      const pos = el.currentTime;
+      let cur = 0;
+      for (let i = 0; i < starts.length; i++) {
+        if (starts[i].time <= pos + 0.05) cur = i;
+        else break;
+      }
+      if (dir > 0) {
+        if (cur < starts.length - 1) {
+          seekWithin(starts[cur + 1].time);
+        } else if (segIdx < segments.length - 1) {
+          initialSeekRef.current = 0;
+          setSegIdx(segIdx + 1);
+          saver.save({
+            current_voice_segment_index: segIdx + 1,
+            current_voice_seconds: 0,
+          });
+          void saver.flush();
+        }
+      } else {
+        const curStart = starts[cur].time;
+        if (pos - curStart > 1.5) {
+          seekWithin(curStart);
+        } else if (cur > 0) {
+          seekWithin(starts[cur - 1].time);
+        } else if (segIdx > 0) {
+          const prevSeg = segments[segIdx - 1];
+          const target = Math.max(0, (prevSeg.duration || 0) - 1);
+          initialSeekRef.current = target;
+          setSegIdx(segIdx - 1);
+          saver.save({
+            current_voice_segment_index: segIdx - 1,
+            current_voice_seconds: target,
+          });
+          void saver.flush();
+        } else {
+          seekWithin(0);
+        }
+      }
+    },
+    [current, segIdx, segments, saver, nudgeForward, nudgeBackward],
+  );
+
   // Stable refs to the latest fn versions — used by the imperative handle so
   // the parent gets a stable callback identity that always calls through to
   // the current closure. Without this, the parent would re-receive the
@@ -662,6 +817,8 @@ export function VoiceReader({
   const togglePlayLatestRef = useRef(togglePlay);
   const nudgeBackwardLatestRef = useRef(nudgeBackward);
   const nudgeForwardLatestRef = useRef(nudgeForward);
+  const playFromPageLatestRef = useRef(playFromPage);
+  const stepParagraphLatestRef = useRef(stepParagraph);
   const playingLatestRef = useRef(playing);
   useEffect(() => {
     togglePlayLatestRef.current = togglePlay;
@@ -672,6 +829,12 @@ export function VoiceReader({
   useEffect(() => {
     nudgeForwardLatestRef.current = nudgeForward;
   }, [nudgeForward]);
+  useEffect(() => {
+    playFromPageLatestRef.current = playFromPage;
+  }, [playFromPage]);
+  useEffect(() => {
+    stepParagraphLatestRef.current = stepParagraph;
+  }, [stepParagraph]);
   useEffect(() => {
     playingLatestRef.current = playing;
   }, [playing]);
@@ -685,6 +848,8 @@ export function VoiceReader({
       nudgeBackward: (s) => nudgeBackwardLatestRef.current(s),
       nudgeForward: (s) => nudgeForwardLatestRef.current(s),
       isPlaying: () => playingLatestRef.current,
+      playFromPage: (p) => playFromPageLatestRef.current(p),
+      stepParagraph: (d) => stepParagraphLatestRef.current(d),
     };
     onControlsReady(handle);
     return () => onControlsReady(null);
