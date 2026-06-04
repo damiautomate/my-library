@@ -16,21 +16,30 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronRight as ChevronRightSmall,
+  Check,
   FastForward,
   Headphones,
-  Highlighter,
   List,
   Loader2,
   Maximize,
   Minimize,
   Pause,
+  PenLine,
   Play,
   Rewind,
   X as XIcon,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
+import { makeDebouncedSaver } from "@/lib/progress";
+import {
+  chapterForPageIndex,
+  createNote,
+  emptyAnchor,
+  HIGHLIGHT_COLORS,
+  watchBookNotes,
+} from "@/lib/notes";
+import type { EpubChapterMapping, Note, NoteRect } from "@/lib/types";
 
 // Worker served from jsdelivr (mirrors npm exactly).
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -74,6 +83,9 @@ interface PDFReaderProps {
   onVoiceTogglePlay?: () => void;
   onVoiceNudgeBackward?: () => void;
   onVoiceNudgeForward?: () => void;
+  /** Chapter map, so a highlight captured on page N is filed under the right
+   *  chapter in the notebook (Phase 9z). */
+  chapterMap?: EpubChapterMapping[];
 }
 
 /** Flattened TOC node — what we render in the sidebar. */
@@ -109,6 +121,7 @@ export function PDFReader({
   onVoiceTogglePlay,
   onVoiceNudgeBackward,
   onVoiceNudgeForward,
+  chapterMap,
 }: PDFReaderProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [page, setPage] = useState<number>(initialPage ?? 1);
@@ -584,12 +597,39 @@ export function PDFReader({
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  // ----- Highlight capture -----------------------------------------------
+  // ----- Highlighting & notes (Phase 9z) ---------------------------------
+  // A selection in the PDF text layer becomes a `book_notes` highlight: the
+  // quote, a colour, and NORMALISED rects (fractions of the page box, so they
+  // redraw at any zoom). The chapter is auto-detected from the current page.
   const [selection, setSelection] = useState<{
     text: string;
-    rect: DOMRect;
+    rect: DOMRect; // viewport rect of the whole selection — positions the toolbar
+    rects: NoteRect[]; // per-line rects, normalised to the page box
   } | null>(null);
-  const [savedToast, setSavedToast] = useState(false);
+  const [composer, setComposer] = useState<{
+    text: string;
+    rects: NoteRect[];
+    page: number;
+  } | null>(null);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+
+  // Live highlights for this book, so saved marks redraw on their pages.
+  const [notes, setNotes] = useState<Note[]>([]);
+  useEffect(() => {
+    return watchBookNotes(userId, bookId, setNotes);
+  }, [userId, bookId]);
+
+  const pageHighlights = useMemo(
+    () =>
+      notes.filter(
+        (n) =>
+          n.anchor.medium === "pdf" &&
+          n.anchor.page === page &&
+          !!n.anchor.rects &&
+          n.anchor.rects.length > 0,
+      ),
+    [notes, page],
+  );
 
   useEffect(() => {
     function handleSelection() {
@@ -608,29 +648,87 @@ export function PDFReader({
         setSelection(null);
         return;
       }
+      const pageEl = pageWrapperRef.current.querySelector(
+        ".react-pdf__Page",
+      ) as HTMLElement | null;
+      if (!pageEl) {
+        setSelection(null);
+        return;
+      }
       const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      setSelection({ text, rect });
+      const pageRect = pageEl.getBoundingClientRect();
+      const rects: NoteRect[] = Array.from(range.getClientRects())
+        .filter((r) => r.width > 1 && r.height > 1)
+        .map((r) => ({
+          x: (r.left - pageRect.left) / pageRect.width,
+          y: (r.top - pageRect.top) / pageRect.height,
+          w: r.width / pageRect.width,
+          h: r.height / pageRect.height,
+        }))
+        // Drop stray rects outside the page (selection handles, etc.).
+        .filter((r) => r.x > -0.05 && r.x < 1.05 && r.y > -0.05 && r.y < 1.05)
+        .slice(0, 80);
+      setSelection({ text, rect: range.getBoundingClientRect(), rects });
     }
     document.addEventListener("selectionchange", handleSelection);
-    return () => document.removeEventListener("selectionchange", handleSelection);
+    return () =>
+      document.removeEventListener("selectionchange", handleSelection);
   }, []);
 
-  async function captureHighlight() {
+  const clearSelection = useCallback(() => {
+    window.getSelection()?.removeAllRanges();
+    setSelection(null);
+  }, []);
+
+  /** Persist a highlight note from a captured snapshot. */
+  const saveHighlight = useCallback(
+    async (
+      color: string | null,
+      body: string,
+      snap: { text: string; rects: NoteRect[]; page: number },
+    ) => {
+      const ch = chapterForPageIndex(chapterMap, snap.page);
+      try {
+        await createNote(userId, bookId, {
+          type: "highlight",
+          quote: snap.text,
+          color,
+          body,
+          anchor: {
+            ...emptyAnchor("pdf"),
+            chapter_index: ch.index,
+            chapter_title: ch.title,
+            page: snap.page,
+            rects: snap.rects,
+          },
+        });
+        setSavedToast(body ? "Note saved" : "Highlighted");
+        setTimeout(() => setSavedToast(null), 1800);
+      } catch (err) {
+        console.error("[pdf] saveHighlight failed", err);
+        setSavedToast("Couldn’t save — try again");
+        setTimeout(() => setSavedToast(null), 2200);
+      }
+    },
+    [userId, bookId, chapterMap],
+  );
+
+  /** Instant colour highlight (no commentary). */
+  function highlightWith(color: string) {
     if (!selection) return;
-    try {
-      await addHighlight(userId, bookId, {
-        page,
-        text: selection.text,
-        color: "yellow",
-      });
-      setSavedToast(true);
-      setTimeout(() => setSavedToast(false), 1800);
-      window.getSelection()?.removeAllRanges();
-      setSelection(null);
-    } catch (err) {
-      console.error("[pdf] saveHighlight failed", err);
-    }
+    void saveHighlight(color, "", {
+      text: selection.text,
+      rects: selection.rects,
+      page,
+    });
+    clearSelection();
+  }
+
+  /** Open the quick "add a thought" sheet for the current selection. */
+  function openComposer() {
+    if (!selection) return;
+    setComposer({ text: selection.text, rects: selection.rects, page });
+    clearSelection();
   }
 
   // Update pageInput display when page changes
@@ -821,34 +919,60 @@ export function PDFReader({
         </div>
       )}
 
-      {/* Floating selection action */}
+      {/* Floating selection toolbar — colour swatches + add-note */}
       {selection && (
         <div
           className="fixed z-30"
           style={{
-            top: Math.max(80, selection.rect.top - 44),
+            top: Math.max(70, selection.rect.top - 50),
             left: Math.min(
-              window.innerWidth - 160,
-              Math.max(10, selection.rect.left + selection.rect.width / 2 - 70),
+              (typeof window !== "undefined" ? window.innerWidth : 360) - 224,
+              Math.max(8, selection.rect.left + selection.rect.width / 2 - 108),
             ),
           }}
+          onMouseDown={(e) => e.preventDefault()}
         >
-          <button
-            type="button"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={captureHighlight}
-            className="inline-flex items-center gap-1.5 rounded-sm border border-gold-500 bg-parchment-50 px-3 py-1.5 text-xs font-medium text-ink-900 shadow-paper-lg hover:bg-parchment-100"
-          >
-            <Highlighter size={12} className="text-gold-600" />
-            Save highlight
-          </button>
+          <div className="flex items-center gap-1.5 rounded-full border border-ink-500/25 bg-parchment-50 px-2 py-1.5 shadow-paper-lg">
+            {HIGHLIGHT_COLORS.map((c) => (
+              <button
+                key={c.hex}
+                type="button"
+                aria-label={`Highlight ${c.label}`}
+                onClick={() => highlightWith(c.hex)}
+                className="h-6 w-6 rounded-full border border-ink-900/10 transition-transform hover:scale-110"
+                style={{ backgroundColor: c.hex }}
+              />
+            ))}
+            <span className="mx-0.5 h-5 w-px bg-ink-500/20" />
+            <button
+              type="button"
+              aria-label="Add a note"
+              onClick={openComposer}
+              className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs text-ink-800 hover:bg-parchment-100"
+            >
+              <PenLine size={13} className="text-oxblood-700" />
+              Note
+            </button>
+          </div>
         </div>
       )}
 
       {savedToast && (
-        <div className="fixed bottom-6 left-1/2 z-30 -translate-x-1/2 rounded-sm border border-forest-600/40 bg-forest-50 px-4 py-2 text-sm text-forest-600 shadow-paper-lg">
-          ✓ Highlight saved
+        <div className="fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1.5 rounded-sm border border-forest-600/40 bg-forest-50 px-4 py-2 text-sm text-forest-600 shadow-paper-lg">
+          <Check size={14} />
+          {savedToast}
         </div>
+      )}
+
+      {composer && (
+        <QuickNoteSheet
+          snapshot={composer}
+          onCancel={() => setComposer(null)}
+          onSave={(color, body) => {
+            void saveHighlight(color, body.trim(), composer);
+            setComposer(null);
+          }}
+        />
       )}
 
       {/* Tap zones — invisible left/right thirds for nav (visible touch hints
@@ -860,6 +984,7 @@ export function PDFReader({
         style={{ touchAction: "pan-y" }}
       >
         <div className="mx-auto flex justify-center">
+          <div className="relative">
           <Document
             file={url}
             onLoadSuccess={(info) => {
@@ -911,6 +1036,31 @@ export function PDFReader({
               onRenderSuccess={handlePageRenderSuccess}
             />
           </Document>
+          {/* Saved-highlight overlay (Phase 9z). Percentage coords reconstruct
+              the normalised rects exactly, at any zoom. pointer-events-none so
+              it never blocks selection or the nav tap-zones. */}
+          {renderedPage === page && pageHighlights.length > 0 && (
+            <div className="pointer-events-none absolute inset-0">
+              {pageHighlights.map((n) =>
+                (n.anchor.rects ?? []).map((r, i) => (
+                  <span
+                    key={`${n.id}-${i}`}
+                    className="absolute rounded-[1px]"
+                    style={{
+                      left: `${r.x * 100}%`,
+                      top: `${r.y * 100}%`,
+                      width: `${r.w * 100}%`,
+                      height: `${r.h * 100}%`,
+                      backgroundColor: n.color ?? "#E8C766",
+                      opacity: 0.4,
+                      mixBlendMode: "multiply",
+                    }}
+                  />
+                )),
+              )}
+            </div>
+          )}
+          </div>
         </div>
       </div>
 
@@ -939,6 +1089,89 @@ export function PDFReader({
           />
         </>
       )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// QuickNoteSheet — bottom-sheet composer to attach a thought to a highlight
+// ----------------------------------------------------------------------------
+
+function QuickNoteSheet({
+  snapshot,
+  onSave,
+  onCancel,
+}: {
+  snapshot: { text: string; rects: NoteRect[]; page: number };
+  onSave: (color: string | null, body: string) => void;
+  onCancel: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [color, setColor] = useState<string>(HIGHLIGHT_COLORS[0].hex);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-ink-900/30 backdrop-blur-[1px]"
+      onClick={onCancel}
+    >
+      <div
+        className="ml-card w-full max-w-xl rounded-b-none px-5 pb-6 pt-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-ink-500/25" />
+        <p className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-oxblood-700">
+          Add a note · page {snapshot.page}
+        </p>
+        <blockquote
+          className="mt-2 max-h-24 overflow-auto border-l-2 pl-3 font-display text-sm italic leading-relaxed text-ink-800"
+          style={{ borderColor: color }}
+        >
+          “{snapshot.text}”
+        </blockquote>
+
+        <div className="mt-3 flex items-center gap-2">
+          {HIGHLIGHT_COLORS.map((c) => (
+            <button
+              key={c.hex}
+              type="button"
+              aria-label={c.label}
+              onClick={() => setColor(c.hex)}
+              className={
+                "h-6 w-6 rounded-full border transition-transform hover:scale-110 " +
+                (color === c.hex ? "ring-2 ring-ink-700/40 ring-offset-1" : "")
+              }
+              style={{ backgroundColor: c.hex, borderColor: `${c.hex}AA` }}
+            />
+          ))}
+        </div>
+
+        <textarea
+          autoFocus
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={3}
+          placeholder="Your thought on this passage…"
+          className="mt-3 w-full rounded-sm border border-ink-500/25 bg-parchment-50 px-3 py-2 text-sm text-ink-900 placeholder:text-ink-500/70 focus:border-ink-700 focus:outline-none focus:ring-1 focus:ring-ink-700/20"
+        />
+
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-sm border border-ink-500/30 px-4 py-2 text-sm text-ink-800 hover:bg-parchment-100"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onSave(color, body)}
+            className="inline-flex items-center gap-1.5 rounded-sm border border-oxblood-700 bg-oxblood-600 px-4 py-2 text-sm font-medium text-parchment-50 hover:bg-oxblood-700"
+          >
+            <PenLine size={13} />
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

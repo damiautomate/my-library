@@ -236,6 +236,7 @@ function ReadContent() {
             onVoiceNudgeForward={hasVoice ? handleVoiceNudgeForward : undefined}
             onPercentChange={setLivePct}
             onPageChange={setLivePage}
+            chapterMap={book.epub_chapter_map}
           />
         )}
         {mode === "epub" && proxyUrls.epub && (
