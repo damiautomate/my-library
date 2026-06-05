@@ -143,7 +143,13 @@ export function EPUBReader({
   // back-and-forth jitter. Tracking the last navigated chapter href means we
   // only load a new section when the reader genuinely crosses into it; the
   // within-chapter page flipping is left entirely to pageFollow.
-  const lastNavigatedHref = useRef<string | null>(null);
+  //
+  // Precise sync (fix for "jumps to chapter beginning"): we navigate to the
+  // per-paragraph anchor the converter emits (id="pg{page}-p{idx}") rather
+  // than the chapter href, so we land on the exact page being read. Deduped by
+  // source page so we don't re-navigate on every event.
+  const lastSyncedPageRef = useRef<number | null>(null);
+  const lastNarrationNavRef = useRef<number | null>(null);
   // Track current highlight target in refs so the "rendered" event handler
   // (set up once at mount) can read the latest values without re-binding.
   const currentHighlightPageRef = useRef<number | null>(null);
@@ -157,26 +163,51 @@ export function EPUBReader({
   useEffect(() => {
     currentHighlightParagraphRef.current = currentReadingParagraph ?? null;
   }, [currentReadingParagraph]);
+  // Resolve the chapter href that contains a given source page.
+  const chapterHrefForPage = useCallback(
+    (page: number): string | null => {
+      if (!chapterMap || chapterMap.length === 0) return null;
+      let target: EpubChapterMapping | null = null;
+      for (const c of chapterMap) {
+        if (c.source_page_start <= page) target = c;
+        else break;
+      }
+      return target ? target.href : null;
+    },
+    [chapterMap],
+  );
+
+  // Navigate to the EXACT source page (and paragraph) via the converter's
+  // per-paragraph anchors (id="pg{page}-p{idx}"). Displaying the chapter href
+  // alone lands on the chapter's first page — the cause of "jumps back to the
+  // chapter beginning". Falls back to the chapter href for EPUBs built before
+  // anchors existed (those need a Re-convert for precise sync).
+  const navigateToSourcePage = useCallback(
+    (page: number, paragraphIndex = 0) => {
+      const rendition = renditionRef.current;
+      if (!rendition) return;
+      const href = chapterHrefForPage(page);
+      const base = href ? href.split("#")[0] : "";
+      const anchorId = `pg${page}-p${paragraphIndex}`;
+      const target = base ? `${base}#${anchorId}` : anchorId;
+      Promise.resolve(rendition.display(target)).catch(() => {
+        if (base) Promise.resolve(rendition.display(base)).catch(() => {});
+      });
+    },
+    [chapterHrefForPage],
+  );
+
+  // Cross-tab sync: when the member advances pages on the PDF/Voice tab,
+  // externalPage changes. Jump to that exact page (not the chapter start).
+  // Deduped by page; during pure listening externalPage is static so this
+  // stays dormant and never fights paragraph-follow.
   useEffect(() => {
     if (externalPage == null) return;
-    if (!chapterMap || chapterMap.length === 0) return;
     if (!renditionRef.current) return;
-
-    // Find the chapter with the greatest source_page_start <= externalPage
-    let target: EpubChapterMapping | null = null;
-    for (const c of chapterMap) {
-      if (c.source_page_start <= externalPage) target = c;
-      else break;
-    }
-    if (target && lastNavigatedHref.current !== target.href) {
-      lastNavigatedHref.current = target.href;
-      try {
-        renditionRef.current.display(target.href);
-      } catch (err) {
-        console.warn("[epub] chapter navigation failed", err);
-      }
-    }
-  }, [externalPage, chapterMap]);
+    if (lastSyncedPageRef.current === externalPage) return;
+    lastSyncedPageRef.current = externalPage;
+    navigateToSourcePage(externalPage, 0);
+  }, [externalPage, navigateToSourcePage]);
 
   // Follow the audio in PAGINATED mode by flipping to the page that contains
   // the just-highlighted paragraph — the EPUB analogue of the PDF advancing
@@ -248,12 +279,31 @@ export function EPUBReader({
           }
         }
       }
+      // A match means we're on the right chapter — clear the nav dedupe so a
+      // later return to a far page can navigate again.
+      if (matched) {
+        lastNarrationNavRef.current = null;
+      }
       // Diagnostic (9w): if we have a narration target but found no match,
       // report what the rendered content actually contains. anchorCount === 0
       // means this EPUB has no page anchors at all → it predates the current
       // converter and needs a Re-convert. anchorCount > 0 but no match means
-      // the narrated page isn't in the currently-rendered chapter yet.
+      // the narrated page isn't in the currently-rendered chapter yet — so we
+      // navigate to its anchor (loads the right chapter at the exact page).
       if (!matched) {
+        const narratedPage =
+          currentReadingParagraph?.page ?? currentReadingPage ?? null;
+        if (
+          narratedPage != null &&
+          anchorCount > 0 &&
+          lastNarrationNavRef.current !== narratedPage
+        ) {
+          lastNarrationNavRef.current = narratedPage;
+          navigateToSourcePage(
+            narratedPage,
+            currentReadingParagraph?.paragraphIndex ?? 0,
+          );
+        }
         console.warn(
           `[epub-sync] no highlight match. narratedPage=${currentReadingPage} para=${
             currentReadingParagraph
@@ -268,7 +318,12 @@ export function EPUBReader({
     } catch (err) {
       console.warn("[epub] highlight update failed", err);
     }
-  }, [currentReadingPage, currentReadingParagraph, renditionReady]);
+  }, [
+    currentReadingPage,
+    currentReadingParagraph,
+    renditionReady,
+    navigateToSourcePage,
+  ]);
 
   const getRendition: IReactReaderProps["getRendition"] = (rendition) => {
     renditionRef.current = rendition;

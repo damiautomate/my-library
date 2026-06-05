@@ -273,6 +273,62 @@ export interface ExtractedPdf {
 }
 
 /**
+ * Remove running headers/footers (incl. page numbers) that repeat across the
+ * book. These are the lines that get narrated as "forty-five" or read out as a
+ * repeated chapter title on every page.
+ *
+ * Detection is cross-page so we never strip a one-off heading: we look only at
+ * each page's FIRST and LAST paragraph block, normalise it (lowercased, every
+ * run of digits collapsed to "#"), and tally how often each normalised form
+ * appears. A form seen on ≥25% of pages (min 4) is a running header/footer and
+ * is dropped from the pages where it sits. Normalising digits means
+ * "Chapter Three 45" and "Chapter Three 46" — and bare page numbers "45"/"46"
+ * — collapse to the same key and are caught together.
+ *
+ * Runs BEFORE paragraph splitting, on the shared page text, so the EPUB build
+ * and the voice generation stay perfectly index-aligned.
+ */
+function stripRunningHeadersFooters(pages: PdfPage[]): PdfPage[] {
+  if (pages.length < 4) return pages;
+  const norm = (s: string) =>
+    s
+      .trim()
+      .toLowerCase()
+      .replace(/\d+/g, "#")
+      .replace(/\s+/g, " ")
+      .trim();
+  const blocksPerPage = pages.map((p) =>
+    p.text
+      .split(/\n\s*\n+/)
+      .map((b) => b.trim())
+      .filter(Boolean),
+  );
+  const firstCounts = new Map<string, number>();
+  const lastCounts = new Map<string, number>();
+  for (const blocks of blocksPerPage) {
+    if (blocks.length === 0) continue;
+    const f = norm(blocks[0]);
+    const l = norm(blocks[blocks.length - 1]);
+    if (f && f.length <= 60) firstCounts.set(f, (firstCounts.get(f) ?? 0) + 1);
+    if (l && l.length <= 60) lastCounts.set(l, (lastCounts.get(l) ?? 0) + 1);
+  }
+  const threshold = Math.max(4, Math.floor(pages.length * 0.25));
+  const repeated = (counts: Map<string, number>, key: string) =>
+    key.length > 0 && (counts.get(key) ?? 0) >= threshold;
+
+  return pages.map((p, i) => {
+    const blocks = blocksPerPage[i];
+    if (blocks.length <= 1) return p;
+    let start = 0;
+    let end = blocks.length;
+    if (repeated(firstCounts, norm(blocks[0]))) start = 1;
+    if (end - start > 0 && repeated(lastCounts, norm(blocks[end - 1]))) end -= 1;
+    if (start === 0 && end === blocks.length) return p;
+    return { ...p, text: blocks.slice(start, end).join("\n\n") };
+  });
+}
+
+/**
  * Extract every page's text plus the outline (if present). Used by:
  *   - PDF → EPUB conversion (chapter detection + per-chapter text)
  *   - TTS voice generation (page-level audio segmentation)
@@ -325,7 +381,11 @@ export async function extractPdfFull(pdfUrl: string): Promise<ExtractedPdf> {
     await doc.destroy();
   } catch {}
 
-  return { total_pages: doc.numPages, pages, outline };
+  return {
+    total_pages: doc.numPages,
+    pages: stripRunningHeadersFooters(pages),
+    outline,
+  };
 }
 
 interface RawOutlineItem {

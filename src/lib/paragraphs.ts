@@ -113,6 +113,16 @@ export function headingLevel(text: string): 0 | 2 | 3 {
     return 2;
   }
 
+  // Numbered heading: "1 Introduction", "2. Results", "1.3 The Method".
+  // Top-level number → section heading; sub-numbered (1.2) → subheading.
+  if (
+    /^\d{1,2}(\.\d{1,2}){0,2}\.?\s+[A-Za-z][^.!?]*$/.test(t) &&
+    !endsWithSentence &&
+    wordCount <= 12
+  ) {
+    return /^\d{1,2}\.\d/.test(t) ? 3 : 2;
+  }
+
   // All-caps multi-word line → top-level heading (e.g. "WHY WE FAIL").
   if (/^[A-Z][A-Z0-9'\-&\s]+[A-Z0-9]$/.test(t) && wordCount >= 2 && wordCount <= 12) {
     return 2;
