@@ -4,6 +4,8 @@ import { useState } from "react";
 import {
   BookOpen,
   Check,
+  ChevronDown,
+  ChevronUp,
   FileText,
   Headphones,
   Pencil,
@@ -14,6 +16,7 @@ import {
 import type { Note } from "@/lib/types";
 import { noteTypeMeta } from "@/lib/notes";
 import { NOTE_TYPE_ICON } from "./noteTypeIcons";
+import { Markdown } from "./Markdown";
 
 interface NoteCardProps {
   note: Note;
@@ -21,6 +24,10 @@ interface NoteCardProps {
   onDelete: (note: Note) => void;
   onToggleDone: (note: Note) => void;
   onToggleStar: (note: Note) => void;
+  /** Provided only in the by-chapter view, where manual order applies.
+   *  Undefined when the note is at the top/bottom of its chapter. */
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
 }
 
 /** Tiny rgba helper so we can tint backgrounds/borders from a hex accent. */
@@ -60,12 +67,15 @@ export function NoteCard({
   onDelete,
   onToggleDone,
   onToggleStar,
+  onMoveUp,
+  onMoveDown,
 }: NoteCardProps) {
   const meta = noteTypeMeta(note.type);
   const Icon = NOTE_TYPE_ICON[note.type];
   const isExercise = note.type === "exercise";
   const done = note.done === true;
   const [confirming, setConfirming] = useState(false);
+  const reorderable = onMoveUp !== undefined || onMoveDown !== undefined;
 
   return (
     <article
@@ -83,6 +93,28 @@ export function NoteCard({
         </span>
 
         <div className="flex items-center gap-0.5">
+          {reorderable && (
+            <div className="mr-0.5 flex items-center">
+              <button
+                type="button"
+                onClick={onMoveUp}
+                disabled={!onMoveUp}
+                aria-label="Move up"
+                className="rounded-sm p-1 text-ink-400 transition-colors hover:bg-parchment-200 hover:text-ink-700 disabled:cursor-default disabled:opacity-25 disabled:hover:bg-transparent"
+              >
+                <ChevronUp size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={onMoveDown}
+                disabled={!onMoveDown}
+                aria-label="Move down"
+                className="rounded-sm p-1 text-ink-400 transition-colors hover:bg-parchment-200 hover:text-ink-700 disabled:cursor-default disabled:opacity-25 disabled:hover:bg-transparent"
+              >
+                <ChevronDown size={13} />
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => onToggleStar(note)}
@@ -153,15 +185,15 @@ export function NoteCard({
             </blockquote>
           )}
           {note.body && (
-            <p
+            <div
               className={
-                "whitespace-pre-line text-sm leading-relaxed text-ink-800 " +
+                "text-sm leading-relaxed text-ink-800 " +
                 (note.quote ? "mt-2 " : "") +
                 (done ? "text-ink-500 line-through" : "")
               }
             >
-              {note.body}
-            </p>
+              <Markdown text={note.body} />
+            </div>
           )}
           {!note.quote && !note.body && (
             <p className="text-sm italic text-ink-500">Empty note</p>

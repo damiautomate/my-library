@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Bold, Eye, Italic, List, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
@@ -17,6 +18,7 @@ import {
 } from "@/lib/notes";
 import type { Book, Note, NoteType } from "@/lib/types";
 import { NOTE_TYPE_ICON } from "./noteTypeIcons";
+import { Markdown } from "./Markdown";
 
 interface NoteEditorProps {
   open: boolean;
@@ -49,10 +51,44 @@ export function NoteEditor({
   const [color, setColor] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  /** Wrap the current selection (or insert a placeholder) with a marker. */
+  function surround(marker: string, after = marker) {
+    const ta = bodyRef.current;
+    const start = ta?.selectionStart ?? body.length;
+    const end = ta?.selectionEnd ?? body.length;
+    const selected = body.slice(start, end) || "text";
+    setBody(body.slice(0, start) + marker + selected + after + body.slice(end));
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      ta.focus();
+      const a = start + marker.length;
+      ta.setSelectionRange(a, a + selected.length);
+    });
+  }
+  /** Prefix each selected line (used for bullet lists). */
+  function prefixLines(prefix: string) {
+    const ta = bodyRef.current;
+    const start = ta?.selectionStart ?? body.length;
+    const end = ta?.selectionEnd ?? body.length;
+    const lineStart = body.lastIndexOf("\n", start - 1) + 1;
+    const block = body.slice(lineStart, end);
+    const replaced = block.length
+      ? block
+          .split("\n")
+          .map((l) => (l.trim() ? prefix + l : l))
+          .join("\n")
+      : prefix;
+    setBody(body.slice(0, lineStart) + replaced + body.slice(end));
+    requestAnimationFrame(() => ta?.focus());
+  }
 
   // (Re)seed the form whenever the modal opens or the target note changes.
   useEffect(() => {
     if (!open) return;
+    setPreview(false);
     if (editing) {
       setType(editing.type);
       setChapterKey(editing.anchor.chapter_index == null ? "" : String(editing.anchor.chapter_index));
@@ -214,15 +250,59 @@ export function NoteEditor({
           placeholder="Paste or type a passage from the book…"
         />
 
-        {/* Body */}
-        <Textarea
-          label="Your note"
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={5}
-          placeholder={NOTE_TYPE_META[type].hint}
-          hint="Plain text for now — rich formatting is coming."
-        />
+        {/* Body — light markdown with a formatting toolbar + preview */}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-600">
+              Your note
+            </span>
+            <div className="flex items-center gap-0.5">
+              <FmtBtn label="Bold" onClick={() => surround("**")}>
+                <Bold size={13} />
+              </FmtBtn>
+              <FmtBtn label="Italic" onClick={() => surround("*")}>
+                <Italic size={13} />
+              </FmtBtn>
+              <FmtBtn label="Bulleted list" onClick={() => prefixLines("- ")}>
+                <List size={13} />
+              </FmtBtn>
+              <span className="mx-1 h-4 w-px bg-ink-500/20" />
+              <button
+                type="button"
+                onClick={() => setPreview((p) => !p)}
+                className="inline-flex items-center gap-1 rounded-sm border border-ink-500/20 px-2 py-1 font-mono text-[0.58rem] uppercase tracking-[0.12em] text-ink-700 hover:bg-parchment-100"
+              >
+                {preview ? (
+                  <>
+                    <Pencil size={11} /> Write
+                  </>
+                ) : (
+                  <>
+                    <Eye size={11} /> Preview
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+          {preview ? (
+            <div className="min-h-[8.5rem] rounded-sm border border-ink-500/25 bg-parchment-50 px-3 py-2 text-sm leading-relaxed text-ink-800">
+              {body.trim() ? (
+                <Markdown text={body} />
+              ) : (
+                <span className="italic text-ink-500">Nothing to preview yet.</span>
+              )}
+            </div>
+          ) : (
+            <Textarea
+              ref={bodyRef}
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={5}
+              placeholder={NOTE_TYPE_META[type].hint}
+              hint="Markdown supported: **bold**, *italic*, `code`, - lists, > quote"
+            />
+          )}
+        </div>
 
         {/* Exercise done */}
         {type === "exercise" && (
@@ -247,5 +327,27 @@ export function NoteEditor({
         </div>
       </div>
     </Modal>
+  );
+}
+
+function FmtBtn({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="rounded-sm p-1.5 text-ink-600 transition-colors hover:bg-parchment-100 hover:text-ink-900"
+    >
+      {children}
+    </button>
   );
 }

@@ -19,6 +19,7 @@ import {
   deleteNote,
   groupNotesByChapter,
   groupNotesByType,
+  reorderChapter,
   toggleNoteDone,
   updateNote,
   watchBookNotes,
@@ -94,6 +95,23 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
     onToggleStar: (n: Note) => void updateNote(n.id, { starred: !n.starred }),
   };
 
+  // Move a note within its (already sorted) chapter group. Optimistically
+  // rewrites local order so the UI responds instantly, then persists.
+  function moveNote(group: Note[], index: number, dir: -1 | 1) {
+    const j = index + dir;
+    if (j < 0 || j >= group.length) return;
+    const reordered = [...group];
+    const [item] = reordered.splice(index, 1);
+    reordered.splice(j, 0, item);
+    const orderById = new Map(reordered.map((n, i) => [n.id, i]));
+    setNotes((prev) =>
+      prev?.map((n) =>
+        orderById.has(n.id) ? { ...n, order: orderById.get(n.id)! } : n,
+      ),
+    );
+    void reorderChapter(reordered);
+  }
+
   return (
     <main className="mx-auto max-w-3xl px-4 pb-28 pt-6 sm:px-6 sm:pt-10">
       {/* Top bar */}
@@ -168,8 +186,18 @@ export function Notebook({ book, userId }: { book: Book; userId: string }) {
               <section key={g.index ?? "unfiled"}>
                 <GroupHeader eyebrow={g.index == null ? "" : "Chapter"} title={g.title} count={g.notes.length} />
                 <div className="mt-3 space-y-3">
-                  {g.notes.map((n) => (
-                    <NoteCard key={n.id} note={n} {...cardHandlers} />
+                  {g.notes.map((n, idx) => (
+                    <NoteCard
+                      key={n.id}
+                      note={n}
+                      {...cardHandlers}
+                      onMoveUp={idx > 0 ? () => moveNote(g.notes, idx, -1) : undefined}
+                      onMoveDown={
+                        idx < g.notes.length - 1
+                          ? () => moveNote(g.notes, idx, 1)
+                          : undefined
+                      }
+                    />
                   ))}
                 </div>
               </section>

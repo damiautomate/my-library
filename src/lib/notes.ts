@@ -226,6 +226,21 @@ export async function updateNote(
   });
 }
 
+/**
+ * Persist a manual ordering for the notes of one chapter. Pass the notes in
+ * their new visual order; each note whose `order` no longer matches its
+ * position is rewritten to that position. New notes keep their large
+ * `Date.now()` order until the first reorder, then settle into 0..n indices,
+ * so they always sort after reordered ones until the member moves them.
+ */
+export async function reorderChapter(orderedNotes: Note[]): Promise<void> {
+  const writes: Promise<void>[] = [];
+  orderedNotes.forEach((n, i) => {
+    if (n.order !== i) writes.push(updateNote(n.id, { order: i }));
+  });
+  await Promise.all(writes);
+}
+
 export async function deleteNote(noteId: string): Promise<void> {
   await deleteDoc(doc(db, COL, noteId));
 }
