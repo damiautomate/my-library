@@ -3,10 +3,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactReader, type IReactReaderProps } from "react-reader";
 import type { Rendition, Book as EpubBook } from "epubjs";
-import { Highlighter, Type, ChevronLeft, ChevronRight } from "lucide-react";
-import { addHighlight, makeDebouncedSaver } from "@/lib/progress";
+import {
+  ChevronLeft,
+  ChevronRight,
+  PenLine,
+  Trash2,
+  Type,
+  X as XIcon,
+} from "lucide-react";
+import { makeDebouncedSaver } from "@/lib/progress";
+import {
+  chapterForPageIndex,
+  createNote,
+  deleteNote,
+  emptyAnchor,
+  HIGHLIGHT_COLORS,
+  watchBookNotes,
+} from "@/lib/notes";
 
-import type { EpubChapterMapping } from "@/lib/types";
+import type { EpubChapterMapping, Note } from "@/lib/types";
 
 interface EPUBReaderProps {
   url: string;
@@ -53,8 +68,25 @@ export function EPUBReader({
   const [pendingSelection, setPendingSelection] = useState<{
     cfi: string;
     text: string;
+    page: number | null;
+    paragraphIndex: number | null;
   } | null>(null);
-  const [savedToast, setSavedToast] = useState(false);
+  const [composer, setComposer] = useState<{
+    cfi: string;
+    text: string;
+    page: number | null;
+    paragraphIndex: number | null;
+  } | null>(null);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<{
+    cfi: string;
+    noteId: string;
+  } | null>(null);
+  // Live notes for this book → drive the saved-highlight annotations.
+  const [notes, setNotes] = useState<Note[]>([]);
+  const notesRef = useRef<Note[]>([]);
+  // cfiRange → applied colour, so we add/remove epub.js annotations diff-style.
+  const appliedRef = useRef<Map<string, string>>(new Map());
   // Default font: 95% on desktop, 85% on mobile (narrow viewport = less
   // horizontal room, smaller font = more lines fit on screen)
   const [fontSize, setFontSize] = useState<number>(() => {
@@ -130,6 +162,62 @@ export function EPUBReader({
       void saver.flush();
     };
   }, [saver]);
+
+  // ----- Highlights (Phase D: unified book_notes model) -------------------
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+  useEffect(() => {
+    return watchBookNotes(userId, bookId, setNotes);
+  }, [userId, bookId]);
+
+  // Tapping a rendered highlight asks to remove it (the cb is wired into each
+  // epub.js annotation). We resolve the note id from the latest notes via ref.
+  const requestRemoveByCfi = useCallback((cfi: string) => {
+    const note = notesRef.current.find((n) => n.anchor.cfi_range === cfi);
+    if (note) setPendingRemoval({ cfi, noteId: note.id });
+  }, []);
+
+  // Reconcile epub.js annotations with the saved EPUB highlights, diff-style:
+  // add new ones, remove deleted/recoloured ones. epub.js keeps annotations
+  // across section renders and draws them when their section is shown, so a
+  // single add per cfiRange is enough; renditionReady re-runs this after the
+  // first render so notes that loaded before the rendition still get drawn.
+  useEffect(() => {
+    const r = renditionRef.current;
+    if (!r) return;
+    const want = new Map<string, string>();
+    for (const n of notes) {
+      if (n.anchor.medium === "epub" && n.anchor.cfi_range) {
+        want.set(n.anchor.cfi_range, n.color ?? "#E8C766");
+      }
+    }
+    // Remove stale or recoloured
+    for (const [cfi, color] of Array.from(appliedRef.current)) {
+      if (!want.has(cfi) || want.get(cfi) !== color) {
+        try {
+          r.annotations.remove(cfi, "highlight");
+        } catch {}
+        appliedRef.current.delete(cfi);
+      }
+    }
+    // Add new
+    for (const [cfi, color] of want) {
+      if (appliedRef.current.has(cfi)) continue;
+      try {
+        r.annotations.highlight(
+          cfi,
+          {},
+          () => requestRemoveByCfi(cfi),
+          "epub-note",
+          { fill: color, "fill-opacity": "0.30", "mix-blend-mode": "multiply" },
+        );
+        appliedRef.current.set(cfi, color);
+      } catch {
+        // Section not ready yet — retried on the next render via renditionReady.
+      }
+    }
+  }, [notes, renditionReady, requestRemoveByCfi]);
 
   // External-page → chapter navigation. When the user is on another tab (PDF
   // or Voice) and advances pages there, externalPage changes. If chapterMap
@@ -407,7 +495,26 @@ export function EPUBReader({
         const sel = contents.window.getSelection();
         const text = sel?.toString().trim() ?? "";
         if (text.length < 2) return;
-        setPendingSelection({ cfi: cfiRange, text });
+        // Derive the source page/paragraph from the nearest anchored element so
+        // the note files under the right chapter in the notebook.
+        let page: number | null = null;
+        let paragraphIndex: number | null = null;
+        try {
+          const range = sel?.getRangeAt(0);
+          const node: Node | null | undefined = range?.commonAncestorContainer;
+          const elNode =
+            node && node.nodeType === 1
+              ? (node as Element)
+              : (node?.parentElement ?? null);
+          const anchored = elNode?.closest?.("[data-source-page]") ?? null;
+          if (anchored) {
+            const p = anchored.getAttribute("data-source-page");
+            const pi = anchored.getAttribute("data-page-paragraph-index");
+            page = p ? parseInt(p, 10) : null;
+            paragraphIndex = pi ? parseInt(pi, 10) : null;
+          }
+        } catch {}
+        setPendingSelection({ cfi: cfiRange, text, page, paragraphIndex });
       } catch (err) {
         console.warn("[epub] selection capture failed", err);
       }
@@ -486,31 +593,85 @@ export function EPUBReader({
       });
   };
 
-  async function captureHighlight() {
-    if (!pendingSelection) return;
+  const clearIframeSelection = useCallback(() => {
     try {
-      await addHighlight(userId, bookId, {
-        cfi: pendingSelection.cfi,
-        text: pendingSelection.text,
-        color: "yellow",
-      });
-      setSavedToast(true);
-      setTimeout(() => setSavedToast(false), 1800);
-      // Clear iframe selection. epubjs's types declare getContents() as
-      // singular but it actually returns an array at runtime; cast through
-      // unknown to satisfy TS.
+      const contents = renditionRef.current?.getContents();
+      const arr = (Array.isArray(contents) ? contents : [contents]) as Array<{
+        window: Window;
+      }>;
+      for (const c of arr) c?.window?.getSelection?.()?.removeAllRanges();
+    } catch {}
+  }, []);
+
+  const toast = useCallback((msg: string) => {
+    setSavedToast(msg);
+    setTimeout(() => setSavedToast(null), 1800);
+  }, []);
+
+  const saveEpubHighlight = useCallback(
+    async (
+      snap: {
+        cfi: string;
+        text: string;
+        page: number | null;
+        paragraphIndex: number | null;
+      },
+      color: string | null,
+      body: string,
+    ) => {
+      const ch = chapterForPageIndex(chapterMap, snap.page ?? undefined);
       try {
-        const contents = renditionRef.current?.getContents();
-        const arr = (Array.isArray(contents) ? contents : [contents]) as Array<{
-          window: Window;
-        }>;
-        for (const c of arr) {
-          c?.window?.getSelection()?.removeAllRanges();
-        }
-      } catch {}
-      setPendingSelection(null);
-    } catch (err) {
-      console.error("[epub] saveHighlight failed", err);
+        await createNote(userId, bookId, {
+          type: "highlight",
+          quote: snap.text,
+          color,
+          body,
+          anchor: {
+            ...emptyAnchor("epub"),
+            chapter_index: ch.index,
+            chapter_title: ch.title,
+            page: snap.page,
+            paragraph_index: snap.paragraphIndex,
+            cfi: snap.cfi,
+            cfi_range: snap.cfi,
+          },
+        });
+        toast(body ? "Note saved" : "Highlighted");
+      } catch (err) {
+        console.error("[epub] saveEpubHighlight failed", err);
+        toast("Couldn’t save — try again");
+      }
+    },
+    [userId, bookId, chapterMap, toast],
+  );
+
+  /** Instant colour highlight from the current selection. */
+  function highlightWith(color: string) {
+    if (!pendingSelection) return;
+    void saveEpubHighlight(pendingSelection, color, "");
+    clearIframeSelection();
+    setPendingSelection(null);
+  }
+  /** Open the quick note sheet for the current selection. */
+  function openComposer() {
+    if (!pendingSelection) return;
+    setComposer(pendingSelection);
+    clearIframeSelection();
+    setPendingSelection(null);
+  }
+  async function confirmRemove() {
+    if (!pendingRemoval) return;
+    const { cfi, noteId } = pendingRemoval;
+    setPendingRemoval(null);
+    try {
+      renditionRef.current?.annotations.remove(cfi, "highlight");
+    } catch {}
+    appliedRef.current.delete(cfi);
+    try {
+      await deleteNote(noteId);
+      toast("Highlight removed");
+    } catch {
+      toast("Couldn’t remove — try again");
     }
   }
 
@@ -589,35 +750,155 @@ export function EPUBReader({
       {/* Selection action — anchored to the top of the reader since we can't
           reliably get coords from inside the EPUB iframe across origins. */}
       {pendingSelection && (
-        <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center">
-          <div className="pointer-events-auto inline-flex items-center gap-3 rounded-sm border border-gold-500 bg-parchment-50 px-3 py-2 text-sm shadow-paper-lg">
-            <span className="max-w-[24rem] truncate font-display italic text-ink-700">
-              “{pendingSelection.text}”
-            </span>
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-3">
+          <div className="pointer-events-auto inline-flex max-w-full items-center gap-2 rounded-sm border ml-hairline bg-parchment-50 px-2.5 py-2 shadow-paper-lg">
+            <div className="flex items-center gap-1">
+              {HIGHLIGHT_COLORS.map((c) => (
+                <button
+                  key={c.hex}
+                  type="button"
+                  onClick={() => highlightWith(c.hex)}
+                  title={c.label}
+                  aria-label={`Highlight ${c.label}`}
+                  className="h-5 w-5 rounded-full border border-ink-500/25 transition-transform hover:scale-110"
+                  style={{ backgroundColor: c.hex }}
+                />
+              ))}
+            </div>
+            <span className="mx-0.5 h-5 w-px bg-ink-500/15" />
             <button
               type="button"
-              onClick={captureHighlight}
-              className="inline-flex items-center gap-1.5 rounded-sm border border-gold-500 bg-parchment-100 px-2 py-1 text-xs hover:bg-parchment-200"
+              onClick={openComposer}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-ink-500/20 px-2 py-1 text-xs text-ink-800 hover:bg-parchment-100"
             >
-              <Highlighter size={11} className="text-gold-600" />
-              Save highlight
+              <PenLine size={12} /> Note
             </button>
             <button
               type="button"
-              onClick={() => setPendingSelection(null)}
-              className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500 hover:text-ink-900"
+              onClick={() => {
+                setPendingSelection(null);
+                clearIframeSelection();
+              }}
+              className="rounded-sm p-1 text-ink-500 hover:bg-parchment-100"
+              aria-label="Dismiss"
             >
-              Dismiss
+              <XIcon size={14} />
             </button>
           </div>
         </div>
       )}
 
-      {savedToast && (
-        <div className="absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-sm border border-forest-600/40 bg-forest-50 px-3 py-1.5 text-sm text-forest-600 shadow-paper-lg">
-          ✓ Highlight saved
+      {/* Remove-highlight confirmation (tapping a saved highlight) */}
+      {pendingRemoval && (
+        <div className="absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-sm border ml-hairline bg-parchment-50 px-3 py-2 text-sm shadow-paper-lg">
+          <span className="text-ink-700">Remove this highlight?</span>
+          <button
+            type="button"
+            onClick={() => void confirmRemove()}
+            className="inline-flex items-center gap-1 rounded-sm border border-oxblood-600/40 bg-oxblood-50 px-2 py-1 text-xs text-oxblood-700 hover:bg-oxblood-50/70"
+          >
+            <Trash2 size={12} /> Remove
+          </button>
+          <button
+            type="button"
+            onClick={() => setPendingRemoval(null)}
+            className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500 hover:text-ink-900"
+          >
+            Cancel
+          </button>
         </div>
       )}
+
+      {savedToast && (
+        <div className="absolute bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-sm border border-forest-600/40 bg-forest-50 px-3 py-1.5 text-sm text-forest-600 shadow-paper-lg">
+          ✓ {savedToast}
+        </div>
+      )}
+      </div>
+
+      {composer && (
+        <EpubNoteSheet
+          snapshot={composer}
+          onSave={(color, body) => {
+            void saveEpubHighlight(composer, color, body);
+            setComposer(null);
+          }}
+          onCancel={() => setComposer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function EpubNoteSheet({
+  snapshot,
+  onSave,
+  onCancel,
+}: {
+  snapshot: {
+    cfi: string;
+    text: string;
+    page: number | null;
+    paragraphIndex: number | null;
+  };
+  onSave: (color: string, body: string) => void;
+  onCancel: () => void;
+}) {
+  const [body, setBody] = useState("");
+  const [color, setColor] = useState<string>(HIGHLIGHT_COLORS[0].hex);
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center bg-ink-900/30"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-lg rounded-t-lg border ml-hairline bg-parchment-50 p-4 shadow-paper-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="mb-3 max-h-24 overflow-y-auto font-display text-sm italic text-ink-700">
+          “{snapshot.text}”
+        </p>
+        <div className="mb-3 flex items-center gap-1.5">
+          {HIGHLIGHT_COLORS.map((c) => (
+            <button
+              key={c.hex}
+              type="button"
+              onClick={() => setColor(c.hex)}
+              title={c.label}
+              aria-label={c.label}
+              className={`h-6 w-6 rounded-full ${
+                color === c.hex
+                  ? "ring-2 ring-ink-700 ring-offset-1"
+                  : "border border-ink-500/25"
+              }`}
+              style={{ backgroundColor: c.hex }}
+            />
+          ))}
+        </div>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={3}
+          placeholder="Add a thought…"
+          autoFocus
+          className="w-full resize-none rounded-sm border ml-hairline bg-parchment-50 px-3 py-2 text-sm text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-1 focus:ring-gold-500"
+        />
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500 hover:text-ink-900"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onSave(color, body.trim())}
+            className="rounded-sm border border-oxblood-700 bg-oxblood-600 px-3 py-1.5 text-sm font-medium text-parchment-50 hover:bg-oxblood-700"
+          >
+            Save note
+          </button>
+        </div>
       </div>
     </div>
   );
