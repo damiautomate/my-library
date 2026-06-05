@@ -87,6 +87,10 @@ export function EPUBReader({
   const notesRef = useRef<Note[]>([]);
   // cfiRange → applied colour, so we add/remove epub.js annotations diff-style.
   const appliedRef = useRef<Map<string, string>>(new Map());
+  // Set true only when a chapter is actually rendered but carries no page
+  // anchors — i.e. the stored EPUB predates the anchor-emitting converter and
+  // page-sync/highlighting can't work until it's re-converted.
+  const [needsReconvert, setNeedsReconvert] = useState(false);
   // Default font: 95% on desktop, 85% on mobile (narrow viewport = less
   // horizontal room, smaller font = more lines fit on screen)
   const [fontSize, setFontSize] = useState<number>(() => {
@@ -299,14 +303,19 @@ export function EPUBReader({
 
   // Follow the audio in PAGINATED mode by flipping to the page that contains
   // the just-highlighted paragraph — the EPUB analogue of the PDF advancing
-  // pages. We only navigate when the element is NOT already on the visible
-  // page, so consecutive paragraphs on the same page don't cause a re-flip
-  // on every timeupdate (which would feel jittery and fight the reader).
+  // pages.
   //
-  // Visibility in a column layout: the current page occupies x in
-  // [0, innerWidth). Content on the next page sits at x >= innerWidth; content
-  // already read sits at x <= 0. So the element is on-screen iff its box
-  // overlaps [0, innerWidth).
+  // The reliable mechanism is to navigate to the paragraph's stable anchor
+  // (id="pg{page}-p{idx}") — the same path TOC deep-links use. epub.js snaps to
+  // whole pages, so navigating to an anchor already on the visible page is a
+  // no-op (no jitter), and navigating to one on another page flips there. We
+  // dedupe by anchor so we don't re-issue display() for the same paragraph.
+  //
+  // This deliberately does NOT depend on getBoundingClientRect geometry for the
+  // common (anchored) path — that geometry was brittle across epub.js layout
+  // modes and was a prior source of "doesn't turn". Node-CFI + scroll remain as
+  // fallbacks only for EPUBs built before the id anchors existed.
+  const lastFollowRef = useRef<string | null>(null);
   function pageFollow(
     el: Element,
     contents: { window: Window; cfiFromNode?: (n: Node) => string },
@@ -314,17 +323,31 @@ export function EPUBReader({
     const rendition = renditionRef.current;
     if (!rendition) return;
     try {
+      const page = parseInt(el.getAttribute("data-source-page") ?? "", 10);
+      const idx = parseInt(
+        el.getAttribute("data-page-paragraph-index") ?? "0",
+        10,
+      );
+      if (el.id && !Number.isNaN(page) && chapterMap && chapterMap.length > 0) {
+        if (lastFollowRef.current === el.id) return; // already followed this one
+        lastFollowRef.current = el.id;
+        navigateToSourcePage(page, Number.isNaN(idx) ? 0 : idx);
+        return;
+      }
+      // Fallbacks (no id anchors): only move when the element is off the current
+      // page, using geometry + a node CFI, else a plain scroll.
       const rect = (el as HTMLElement).getBoundingClientRect();
       const w = contents.window.innerWidth || 0;
-      const onCurrentPage = rect.right > 2 && rect.left < w - 2;
-      if (onCurrentPage) return; // already visible — don't disturb the page
-      // Build a CFI for the element and navigate to it. display() within the
-      // same chapter just shifts the column offset (no DOM rebuild), so the
-      // highlight class we set stays put.
+      if (rect.width === 0 && rect.height === 0) return;
+      if (rect.right > 2 && rect.left < w - 2) return;
       const cfi = contents.cfiFromNode?.(el);
-      if (cfi) void rendition.display(cfi);
+      if (cfi) {
+        void rendition.display(cfi);
+        return;
+      }
+      (el as HTMLElement).scrollIntoView?.({ block: "start" });
     } catch {
-      /* iframe not ready / CFI failure — ignore, highlight still applied */
+      /* iframe not ready / navigation failure — ignore, highlight still set */
     }
   }
   useEffect(() => {
@@ -371,6 +394,13 @@ export function EPUBReader({
       // later return to a far page can navigate again.
       if (matched) {
         lastNarrationNavRef.current = null;
+        if (needsReconvert) setNeedsReconvert(false);
+      }
+      // If a chapter is rendered (has a document) but carries NO page anchors,
+      // this EPUB predates the converter and can't be synced — flag it so the
+      // member is told to re-convert (no console-spelunking required).
+      if (!matched && contents.length > 0 && anchorCount === 0 && !needsReconvert) {
+        setNeedsReconvert(true);
       }
       // Diagnostic (9w): if we have a narration target but found no match,
       // report what the rendered content actually contains. anchorCount === 0
@@ -805,6 +835,22 @@ export function EPUBReader({
             className="font-mono text-[0.65rem] uppercase tracking-[0.15em] text-ink-500 hover:text-ink-900"
           >
             Cancel
+          </button>
+        </div>
+      )}
+
+      {needsReconvert && (
+        <div className="absolute inset-x-2 top-3 z-30 mx-auto max-w-md rounded-sm border border-gold-600/50 bg-parchment-100 px-3 py-2 text-center text-xs leading-relaxed text-ink-800 shadow-paper-lg">
+          This book was converted by an older pipeline, so page-sync and
+          highlights can&rsquo;t line up. Re-run{" "}
+          <span className="font-semibold">Convert</span> (then{" "}
+          <span className="font-semibold">Generate voice</span>) in admin.
+          <button
+            type="button"
+            onClick={() => setNeedsReconvert(false)}
+            className="ml-2 font-mono text-[0.6rem] uppercase tracking-[0.12em] text-ink-500 hover:text-ink-900"
+          >
+            Dismiss
           </button>
         </div>
       )}
