@@ -7,21 +7,28 @@ import { BookCover } from "./BookCover";
 
 interface BookCardProps {
   book: Book;
+  /** Set on the first row of a grid so those covers load eagerly instead of
+   * waiting on the lazy-load observer. */
+  priority?: boolean;
 }
 
-export function BookCard({ book }: BookCardProps) {
+export function BookCard({ book, priority = false }: BookCardProps) {
   const room = book.rooms?.[0];
   return (
     <Link
       href={`/book/${book.id}`}
       className="group flex flex-col overflow-hidden rounded-sm border ml-hairline bg-parchment-50 shadow-paper transition-all hover:-translate-y-0.5 hover:shadow-paper-lg"
     >
-      {/* Cover — uses the BookCover helper so broken cover_url values
-       * fall back to the BookOpen icon instead of rendering as empty space. */}
+      {/* Cover — BookCover paints a drawn cover underneath, so this is never
+       * blank whether the URL is missing, dead, or still loading. */}
       <div className="relative aspect-[2/3] overflow-hidden bg-parchment-200">
         <BookCover
           url={book.cover_url}
           alt={book.title}
+          title={book.title}
+          authors={book.authors}
+          room={room}
+          priority={priority}
           imgClassName="transition-transform duration-500 group-hover:scale-[1.02]"
         />
         {book.status === "draft" && (

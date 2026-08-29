@@ -123,7 +123,11 @@ function BookDetailContent() {
             <BookCover
               url={book.cover_url}
               alt={book.title}
-              fallbackSize={56}
+              title={book.title}
+              authors={book.authors}
+              room={book.rooms?.[0]}
+              variant="hero"
+              priority
             />
           </div>
 

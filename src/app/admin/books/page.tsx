@@ -2,7 +2,16 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Edit, Archive, Plus, Eye, Layers, Send } from "lucide-react";
+import {
+  Edit,
+  Archive,
+  Plus,
+  Eye,
+  Layers,
+  Send,
+  Loader2,
+  Image as ImageIcon,
+} from "lucide-react";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
 import { SearchBar, matchesQuery } from "@/components/library/SearchBar";
@@ -27,6 +36,12 @@ function AdminBooksContent() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [coverFixBusy, setCoverFixBusy] = useState(false);
+  const [coverFixProgress, setCoverFixProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const [coverFixErrors, setCoverFixErrors] = useState<string[]>([]);
 
   useEffect(() => {
     load();
@@ -37,6 +52,39 @@ function AdminBooksContent() {
     const all = await listBooks();
     setBooks(all);
     setLoading(false);
+  }
+
+  /**
+   * Books we can rescue: they have a PDF to render but no cover set. Almost
+   * every PDF opens on its own cover art, and for small-press titles that's
+   * the only source that exists — ISBN lookup finds nothing on OpenLibrary or
+   * Google Books for several of them.
+   */
+  const coverless = books.filter((b) => b.pdf_url && !b.cover_url);
+
+  async function backfillCovers() {
+    setCoverFixBusy(true);
+    setCoverFixErrors([]);
+    const targets = coverless;
+    const failures: string[] = [];
+
+    const { generateCoverFromPdf } = await import("@/lib/pdf-cover");
+
+    for (let i = 0; i < targets.length; i++) {
+      setCoverFixProgress({ done: i, total: targets.length });
+      try {
+        await generateCoverFromPdf(targets[i].id);
+      } catch (e) {
+        failures.push(
+          `${targets[i].title}: ${e instanceof Error ? e.message : "failed"}`,
+        );
+      }
+    }
+
+    setCoverFixProgress({ done: targets.length, total: targets.length });
+    setCoverFixErrors(failures);
+    setCoverFixBusy(false);
+    await load();
   }
 
   async function handleArchive(id: string) {
@@ -151,6 +199,47 @@ function AdminBooksContent() {
           ))}
         </div>
       </div>
+
+      {/* Cover backfill — only shown when there's something to fix. */}
+      {(coverless.length > 0 || coverFixProgress) && (
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-sm border border-gold-600/40 bg-[#F0EBD8]/60 px-4 py-3">
+          <div className="min-w-0">
+            <p className="font-display text-base text-ink-900">
+              {coverless.length > 0
+                ? `${coverless.length} book${coverless.length === 1 ? "" : "s"} with a PDF but no cover`
+                : "All PDFs have covers"}
+            </p>
+            <p className="mt-0.5 text-xs text-ink-600">
+              {coverFixBusy && coverFixProgress
+                ? `Rendering ${coverFixProgress.done + 1} of ${coverFixProgress.total}…`
+                : "Renders each PDF's first page and sets it as the cover."}
+            </p>
+            {coverFixErrors.length > 0 && (
+              <ul className="mt-1.5 space-y-0.5">
+                {coverFixErrors.map((e) => (
+                  <li key={e} className="text-xs text-oxblood-700">
+                    {e}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          {coverless.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={backfillCovers}
+              disabled={coverFixBusy}
+            >
+              {coverFixBusy ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <ImageIcon size={14} />
+              )}
+              Generate covers
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Bulk action bar — appears when 1+ books selected */}
       {selected.size > 0 && (

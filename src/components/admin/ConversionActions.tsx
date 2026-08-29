@@ -1,7 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Loader2, BookOpenCheck, Headphones, CheckCircle2, X, AlertTriangle } from "lucide-react";
+import {
+  Loader2,
+  BookOpenCheck,
+  Headphones,
+  CheckCircle2,
+  X,
+  AlertTriangle,
+  Image as ImageIcon,
+} from "lucide-react";
 import { auth as firebaseAuth } from "@/lib/firebase/client";
 import type { Book } from "@/lib/types";
 import { NarratorPicker } from "./NarratorPicker";
@@ -48,6 +56,10 @@ export function ConversionActions({ book, onChanged }: Props) {
   const [convertBusy, setConvertBusy] = useState(false);
   const [convertResult, setConvertResult] = useState<string | null>(null);
   const [convertErr, setConvertErr] = useState<string | null>(null);
+
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [coverResult, setCoverResult] = useState<string | null>(null);
+  const [coverErr, setCoverErr] = useState<string | null>(null);
 
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
@@ -248,7 +260,25 @@ export function ConversionActions({ book, onChanged }: Props) {
     cancelVoiceRef.current = true;
   }
 
-  // Nothing to show if there's no PDF — both actions need one as source
+  async function extractCoverFromPdf() {
+    setCoverBusy(true);
+    setCoverErr(null);
+    setCoverResult(null);
+    try {
+      const { generateCoverFromPdf } = await import("@/lib/pdf-cover");
+      await generateCoverFromPdf(book.id);
+      setCoverResult("Cover taken from the PDF's first page.");
+      onChanged?.();
+    } catch (e) {
+      setCoverErr(
+        e instanceof Error ? e.message : "Could not read the PDF's first page.",
+      );
+    } finally {
+      setCoverBusy(false);
+    }
+  }
+
+  // Nothing to show if there's no PDF — every action here needs one as source
   if (!hasPdf) return null;
 
   return (
@@ -257,8 +287,47 @@ export function ConversionActions({ book, onChanged }: Props) {
         Derived assets
       </p>
 
-      {/* Convert to EPUB row */}
+      {/* Cover-from-PDF row. Most PDFs open on their own cover art, which
+       * beats anything ISBN lookup can find — several small-press titles here
+       * have no cover on OpenLibrary or Google Books at all. */}
       <div className="flex flex-wrap items-start justify-between gap-3 border-b ml-hairline pb-3">
+        <div className="min-w-0 flex-1">
+          <p className="font-display text-base text-ink-900">
+            Cover
+            {book.cover_url && (
+              <span className="ml-2 inline-flex items-center gap-1 align-middle font-mono text-[0.6rem] uppercase tracking-[0.15em] text-forest-600">
+                <CheckCircle2 size={11} />
+                Set
+              </span>
+            )}
+          </p>
+          <p className="mt-1 max-w-xl text-xs text-ink-600">
+            Render the PDF&apos;s first page and use it as this book&apos;s
+            cover. Best source available — it&apos;s the publisher&apos;s own
+            artwork, at full quality.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={extractCoverFromPdf}
+          disabled={coverBusy}
+          className="inline-flex items-center gap-1.5 rounded-sm border border-oxblood-700 bg-oxblood-50 px-3 py-1.5 text-xs text-oxblood-700 hover:bg-oxblood-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {coverBusy ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ImageIcon size={12} />
+          )}
+          {book.cover_url ? "Replace from PDF" : "Use first page"}
+        </button>
+      </div>
+      {coverResult && (
+        <p className="mt-2 text-xs text-forest-600">✓ {coverResult}</p>
+      )}
+      {coverErr && <p className="mt-2 text-xs text-oxblood-700">{coverErr}</p>}
+
+      {/* Convert to EPUB row */}
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-3 border-b ml-hairline pb-3">
         <div className="min-w-0 flex-1">
           <p className="font-display text-base text-ink-900">
             EPUB

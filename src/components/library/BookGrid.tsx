@@ -25,8 +25,10 @@ export function BookGrid({
 
   return (
     <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-      {books.map((b) => (
-        <BookCard key={b.id} book={b} />
+      {books.map((b, i) => (
+        // The widest breakpoint shows 5 per row, so the first 5 are the ones
+        // that can be above the fold — load those eagerly, lazy-load the rest.
+        <BookCard key={b.id} book={b} priority={i < 5} />
       ))}
     </div>
   );

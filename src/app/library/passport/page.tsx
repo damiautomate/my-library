@@ -6,6 +6,7 @@ import { Flame, BookOpen, Clock, FileText, Trophy } from "lucide-react";
 import { doc, onSnapshot } from "firebase/firestore";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
+import { BookCover } from "@/components/library/BookCover";
 import { useAuth } from "@/contexts/AuthContext";
 import { db } from "@/lib/firebase/client";
 import { listBooks } from "@/lib/books";
@@ -211,14 +212,13 @@ function PassportContent() {
                         className="flex-shrink-0"
                       >
                         <div className="h-16 w-12 overflow-hidden rounded-sm border ml-hairline bg-parchment-200">
-                          {book.cover_url && (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={book.cover_url}
-                              alt=""
-                              className="h-full w-full object-cover"
-                            />
-                          )}
+                          <BookCover
+                            url={book.cover_url}
+                            alt=""
+                            title={book.title}
+                            authors={book.authors}
+                            room={book.rooms?.[0]}
+                          />
                         </div>
                       </Link>
                       <div className="min-w-0">

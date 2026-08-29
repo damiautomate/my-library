@@ -191,9 +191,40 @@ export function BookForm({
   const [errors, setErrors] = useState<Partial<Record<keyof BookFormValue, string>>>(
     {},
   );
+  const [autoCoverBusy, setAutoCoverBusy] = useState(false);
+  const [autoCoverErr, setAutoCoverErr] = useState<string | null>(null);
 
   function set<K extends keyof BookFormValue>(key: K, v: BookFormValue[K]) {
     onChange({ ...value, [key]: v });
+  }
+
+  /**
+   * Render the just-uploaded PDF's first page and use it as the cover. Failure
+   * here is never fatal — the cover field simply stays empty and the admin can
+   * set one by hand, so this only surfaces a note rather than blocking a save.
+   */
+  async function autoCoverFromPdf(pdfUrl: string, pdfPublicId: string) {
+    setAutoCoverBusy(true);
+    setAutoCoverErr(null);
+    try {
+      const { uploadCoverFromPdfUrl } = await import("@/lib/pdf-cover");
+      const coverUrl = await uploadCoverFromPdfUrl(bookId, pdfUrl);
+      // `value` here is the snapshot from before the upload's own onChange, so
+      // the PDF fields are re-applied alongside the new cover rather than
+      // being reverted by this spread.
+      onChange({
+        ...value,
+        pdf_url: pdfUrl,
+        pdf_public_id: pdfPublicId,
+        cover_url: coverUrl,
+      });
+    } catch {
+      setAutoCoverErr(
+        "Couldn't read the PDF's first page — set a cover manually if you want one.",
+      );
+    } finally {
+      setAutoCoverBusy(false);
+    }
   }
 
   function setClassification(c: ClassificationValue) {
@@ -352,14 +383,30 @@ export function BookForm({
               bookId={bookId}
               url={value.pdf_url}
               publicId={value.pdf_public_id}
-              onChange={(r) =>
+              onChange={(r) => {
                 onChange({
                   ...value,
                   pdf_url: r?.secure_url ?? "",
                   pdf_public_id: r?.public_id ?? "",
-                })
-              }
+                });
+                // A freshly uploaded PDF opens on its own cover art, which is
+                // a better source than ISBN lookup and works for titles that
+                // have no cover online at all. Only auto-fill when the book
+                // doesn't already have one, so this never overwrites a
+                // deliberate choice.
+                if (r?.secure_url && !value.cover_url) {
+                  void autoCoverFromPdf(r.secure_url, r.public_id ?? "");
+                }
+              }}
             />
+            {autoCoverBusy && (
+              <p className="mt-1.5 text-xs text-ink-600">
+                Taking cover from the PDF&apos;s first page…
+              </p>
+            )}
+            {autoCoverErr && (
+              <p className="mt-1.5 text-xs text-oxblood-700">{autoCoverErr}</p>
+            )}
           </div>
 
           <div>

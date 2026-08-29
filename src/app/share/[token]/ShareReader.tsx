@@ -176,7 +176,13 @@ export function ShareReader({ token }: { token: string }) {
           <div className="flex items-start gap-4 sm:gap-6">
             <div className="w-20 shrink-0 overflow-hidden rounded-sm border ml-hairline bg-parchment-200 shadow-paper-lg sm:w-28">
               <div className="aspect-[2/3]">
-                <BookCover url={book.cover_url} alt={book.title} fallbackSize={32} />
+                <BookCover
+                  url={book.cover_url}
+                  alt={book.title}
+                  title={book.title}
+                  authors={book.authors}
+                  priority
+                />
               </div>
             </div>
             <div className="min-w-0 flex-1">
