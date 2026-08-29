@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Library, Users, MailPlus, BookOpen, Plus, Layers } from "lucide-react";
+import {
+  Library,
+  Users,
+  MailPlus,
+  BookOpen,
+  Plus,
+  Layers,
+  Sparkles,
+} from "lucide-react";
 import { collection, getCountFromServer, query, where } from "firebase/firestore";
 import { Header } from "@/components/library/Header";
 import { AuthGuard } from "@/components/library/AuthGuard";
@@ -101,6 +109,12 @@ function AdminDashboard() {
           icon={<Users size={18} />}
           title="Members"
           body="See who's in the library and what role they hold."
+        />
+        <QuickLink
+          href="/admin/ai"
+          icon={<Sparkles size={18} />}
+          title="AI provider"
+          body="Switch the AI features between Claude and OpenAI, and set which models each uses."
         />
       </section>
     </main>

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
-import { callAnthropic, stripFences } from "@/lib/anthropic";
+import { complete, stripFences } from "@/lib/ai/provider";
 import {
   VOICE_CATALOG,
   getVoiceById,
@@ -17,8 +17,9 @@ export const maxDuration = 30;
  *
  * Reads the book's classification metadata (title, authors, life_domains,
  * reading_modes, description) and a small sample of the book's text (if the
- * voice-extraction cache is warm), then asks Claude Haiku to pick the most
- * suitable voice from VOICE_CATALOG and explain the choice in one sentence.
+ * voice-extraction cache is warm), then asks the configured AI provider's
+ * fast model to pick the most suitable voice from VOICE_CATALOG and explain
+ * the choice in one sentence.
  *
  * Request body:
  *   {
@@ -160,32 +161,20 @@ export async function POST(
     return NextResponse.json({ error: "Book not found" }, { status: 404 });
   const book = bookSnap.data() as BookDoc;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      {
-        error:
-          "ANTHROPIC_API_KEY is not set. Add it to Vercel environment variables.",
-      },
-      { status: 500 },
-    );
-  }
-
   const contentSample = await getContentSample(book.voice_extraction_url);
   const prompt = buildPrompt(book, contentSample, candidates);
 
-  // Haiku is plenty for this — it's a constrained classification task with
-  // a tiny output. Sonnet would be overkill and 3x slower.
-  let res;
+  // The "fast" tier — a constrained classification with a tiny output, so the
+  // cheap model on whichever provider is configured is plenty.
+  let text: string;
   try {
-    res = await callAnthropic(
-      {
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 200,
-        messages: [{ role: "user", content: prompt }],
-      },
-      apiKey,
-    );
+    text = await complete({
+      system:
+        "You match books to narrator voices. Reply with JSON only — no prose, no code fences.",
+      user: prompt,
+      maxTokens: 200,
+      tier: "fast",
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
@@ -194,32 +183,13 @@ export async function POST(
     );
   }
 
-  if (!res.ok) {
-    const errBody = await res.text();
-    return NextResponse.json(
-      { error: `Anthropic API ${res.status}: ${errBody.slice(0, 200)}` },
-      { status: 502 },
-    );
-  }
-
-  const data = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-  const textBlock = data.content?.find((c) => c.type === "text");
-  if (!textBlock?.text) {
-    return NextResponse.json(
-      { error: "AI returned no text" },
-      { status: 502 },
-    );
-  }
-
   let parsed: { voice_id?: string; reasoning?: string };
   try {
-    parsed = JSON.parse(stripFences(textBlock.text));
+    parsed = JSON.parse(stripFences(text));
   } catch {
     return NextResponse.json(
       {
-        error: `AI returned non-JSON output: ${textBlock.text.slice(0, 200)}`,
+        error: `AI returned non-JSON output: ${text.slice(0, 200)}`,
       },
       { status: 502 },
     );

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebase/admin";
-import { classifyBook, type ClassifiedBook } from "@/lib/anthropic";
+import { classifyBook, type ClassifiedBook } from "@/lib/ai/classify";
 import { extractPdfText } from "@/lib/pdf-extract";
 import { cleanIsbn, isValidIsbn, lookupIsbn } from "@/lib/isbn-lookup";
 import {

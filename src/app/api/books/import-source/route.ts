@@ -8,7 +8,7 @@ import {
   probeStandardEbooksEpub,
   findEpubFromPage,
 } from "@/lib/standard-ebooks";
-import { classifyBook } from "@/lib/anthropic";
+import { classifyBook } from "@/lib/ai/classify";
 import { extractPdfText } from "@/lib/pdf-extract";
 import { lookupIsbn, cleanIsbn, isValidIsbn } from "@/lib/isbn-lookup";
 import {

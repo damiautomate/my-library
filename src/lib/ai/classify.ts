@@ -9,11 +9,8 @@ import {
   OUTCOME_SUGGESTIONS,
   FIELD_SUGGESTIONS,
   LANGUAGES,
-} from "./taxonomy";
-
-const MODEL = "claude-sonnet-4-6";
-const API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION = "2023-06-01";
+} from "../taxonomy";
+import { complete, stripFences } from "./provider";
 
 export interface ClassifyInput {
   title: string;
@@ -201,99 +198,27 @@ function buildUserPrompt(input: ClassifyInput): string {
   return parts.join("\n");
 }
 
-/** Strip a leading ```json / trailing ``` if the model added them. */
-export function stripFences(s: string): string {
-  return s
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-}
-
 /**
- * Call Anthropic with retry-on-429 (rate limit) using exponential backoff.
- * Tier 1 accounts have ~5 RPM on Sonnet — bulk imports of 10+ books hit this
- * routinely. We retry up to 5 times with backoff before giving up, which gets
- * a ~1-minute book through reliably.
- */
-export async function callAnthropic(
-  body: object,
-  apiKey: string,
-): Promise<Response> {
-  let lastErr = "";
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (res.status !== 429 && res.status !== 529) return res;
-
-    // 429 (rate limit) or 529 (overloaded) — back off and retry.
-    lastErr = await res.text().catch(() => "");
-    // Prefer the server's hint if present, else exponential backoff capped at 30s.
-    const retryAfter = Number(res.headers.get("retry-after"));
-    const fallback = Math.min(2 ** attempt * 1000 + Math.random() * 1000, 30_000);
-    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-      ? retryAfter * 1000
-      : fallback;
-    console.warn(
-      `[anthropic] ${res.status} on attempt ${attempt + 1}, waiting ${Math.round(waitMs / 1000)}s`,
-    );
-    await new Promise((r) => setTimeout(r, waitMs));
-  }
-  throw new Error(`Anthropic rate-limited after 5 attempts. Last body: ${lastErr.slice(0, 200)}`);
-}
-
-/**
- * Call Anthropic with a tight system prompt and a JSON-only user message.
- * Returns the parsed JSON object or throws on failure.
+ * Classify a book with a tight system prompt and a JSON-only user message.
+ * Runs through whichever provider is configured at /admin/ai. Returns the
+ * parsed JSON object or throws on failure.
  */
 export async function classifyBook(
   input: ClassifyInput,
 ): Promise<ClassifiedBook> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. Add it to Vercel environment variables.",
-    );
-  }
-
-  const body = {
-    model: MODEL,
-    max_tokens: 3000,
+  const text = await complete({
     system: buildSystemPrompt(),
-    messages: [{ role: "user", content: buildUserPrompt(input) }],
-  };
+    user: buildUserPrompt(input),
+    maxTokens: 3000,
+    tier: "smart",
+  });
 
-  const res = await callAnthropic(body, apiKey);
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${errBody.slice(0, 300)}`);
-  }
-
-  const data = (await res.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-    stop_reason?: string;
-  };
-
-  const textBlock = data.content?.find((c) => c.type === "text");
-  if (!textBlock?.text) {
-    throw new Error("Anthropic returned no text content");
-  }
-
-  const cleaned = stripFences(textBlock.text);
+  const cleaned = stripFences(text);
   try {
     return JSON.parse(cleaned) as ClassifiedBook;
-  } catch (err) {
+  } catch {
     throw new Error(
-      `Anthropic returned non-JSON text: ${cleaned.slice(0, 200)}…`,
+      `AI provider returned non-JSON text: ${cleaned.slice(0, 200)}…`,
     );
   }
 }
