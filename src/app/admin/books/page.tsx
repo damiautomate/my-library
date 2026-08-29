@@ -42,10 +42,40 @@ function AdminBooksContent() {
     total: number;
   } | null>(null);
   const [coverFixErrors, setCoverFixErrors] = useState<string[]>([]);
+  const [deadCovers, setDeadCovers] = useState<Set<string>>(new Set());
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     load();
   }, []);
+
+  /**
+   * Probe every PDF-backed book's cover to find the ones whose art is a dead
+   * link or a placeholder. Re-runs after a backfill, so freshly generated
+   * covers drop out of the candidate list.
+   */
+  useEffect(() => {
+    if (books.length === 0) return;
+    let cancelled = false;
+
+    (async () => {
+      setScanning(true);
+      try {
+        const { findUnusableCovers } = await import("@/lib/cover-health");
+        const candidates = books
+          .filter((b) => b.pdf_url && b.cover_url)
+          .map((b) => ({ id: b.id, coverUrl: b.cover_url }));
+        const dead = await findUnusableCovers(candidates);
+        if (!cancelled) setDeadCovers(dead);
+      } finally {
+        if (!cancelled) setScanning(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [books]);
 
   async function load() {
     setLoading(true);
@@ -55,12 +85,19 @@ function AdminBooksContent() {
   }
 
   /**
-   * Books we can rescue: they have a PDF to render but no cover set. Almost
-   * every PDF opens on its own cover art, and for small-press titles that's
-   * the only source that exists — ISBN lookup finds nothing on OpenLibrary or
-   * Google Books for several of them.
+   * Books we can rescue: they have a PDF to render, and either no cover set
+   * or a cover_url pointing at art that doesn't actually exist.
+   *
+   * That second case is the common one and is invisible from Firestore alone.
+   * ISBN autofill writes an OpenLibrary URL whenever the book has an ISBN,
+   * without checking that OpenLibrary holds a cover for it — and a miss there
+   * returns a 1x1 placeholder with HTTP 200, so the field looks populated
+   * while the shelf shows a blank. Only actually loading the image tells them
+   * apart, hence the scan below.
    */
-  const coverless = books.filter((b) => b.pdf_url && !b.cover_url);
+  const coverless = books.filter(
+    (b) => b.pdf_url && (!b.cover_url || deadCovers.has(b.id)),
+  );
 
   async function backfillCovers() {
     setCoverFixBusy(true);
@@ -201,18 +238,22 @@ function AdminBooksContent() {
       </div>
 
       {/* Cover backfill — only shown when there's something to fix. */}
-      {(coverless.length > 0 || coverFixProgress) && (
+      {(coverless.length > 0 || coverFixProgress || scanning) && (
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-sm border border-gold-600/40 bg-[#F0EBD8]/60 px-4 py-3">
           <div className="min-w-0">
             <p className="font-display text-base text-ink-900">
               {coverless.length > 0
-                ? `${coverless.length} book${coverless.length === 1 ? "" : "s"} with a PDF but no cover`
-                : "All PDFs have covers"}
+                ? `${coverless.length} book${coverless.length === 1 ? "" : "s"} with a PDF but no usable cover`
+                : scanning
+                  ? "Checking cover art…"
+                  : "Every PDF has a working cover"}
             </p>
             <p className="mt-0.5 text-xs text-ink-600">
               {coverFixBusy && coverFixProgress
                 ? `Rendering ${coverFixProgress.done + 1} of ${coverFixProgress.total}…`
-                : "Renders each PDF's first page and sets it as the cover."}
+                : scanning
+                  ? "Loading each cover to find broken links and placeholder images."
+                  : "Renders each PDF's first page and sets it as the cover. Includes books whose stored cover art is missing or a placeholder."}
             </p>
             {coverFixErrors.length > 0 && (
               <ul className="mt-1.5 space-y-0.5">

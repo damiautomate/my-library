@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Room } from "@/lib/taxonomy";
+import { normalizeCoverUrl } from "@/lib/cover-url";
 import { GeneratedCover } from "./GeneratedCover";
 
 interface BookCoverProps {
@@ -23,30 +24,6 @@ interface BookCoverProps {
   /** Optional tweak when the cover img loads OK — applied to <img> only,
    * NOT the drawn cover beneath. Used for hover-scale transitions etc. */
   imgClassName?: string;
-}
-
-/**
- * Two OpenLibrary-specific adjustments:
- *
- * 1. It serves the same cover at -S/-M/-L. Stored cover_url values are all -L
- *    (that's what the ISBN lookup writes), far more pixels than a ~200px-wide
- *    shelf card can use. Grid cards get -M; the book-detail hero keeps -L.
- *
- * 2. By default a miss returns a blank placeholder image with HTTP 200 rather
- *    than a 404, so onError never fires and the card shows an empty grey box.
- *    `default=false` makes misses 404 properly, which lets the drawn cover
- *    underneath stand as the real fallback.
- *
- * Anything that isn't an OpenLibrary cover URL is returned untouched.
- */
-function normalizeCoverUrl(url: string, variant: "grid" | "hero"): string {
-  if (!url.includes("covers.openlibrary.org")) return url;
-
-  let out = variant === "grid" ? url.replace(/-L\.jpg/, "-M.jpg") : url;
-  if (!/[?&]default=/.test(out)) {
-    out += (out.includes("?") ? "&" : "?") + "default=false";
-  }
-  return out;
 }
 
 /**

@@ -207,6 +207,16 @@ export function BookForm({
     setAutoCoverBusy(true);
     setAutoCoverErr(null);
     try {
+      // A cover_url being set doesn't mean there's a cover. ISBN autofill
+      // writes an OpenLibrary URL whenever the book has an ISBN, without
+      // checking OpenLibrary actually holds art for it — and a miss there
+      // returns a 1x1 placeholder with HTTP 200. Only keep the existing
+      // cover if it genuinely loads.
+      if (value.cover_url) {
+        const { isCoverUsable } = await import("@/lib/cover-health");
+        if (await isCoverUsable(value.cover_url)) return;
+      }
+
       const { uploadCoverFromPdfUrl } = await import("@/lib/pdf-cover");
       const coverUrl = await uploadCoverFromPdfUrl(bookId, pdfUrl);
       // `value` here is the snapshot from before the upload's own onChange, so
@@ -391,10 +401,10 @@ export function BookForm({
                 });
                 // A freshly uploaded PDF opens on its own cover art, which is
                 // a better source than ISBN lookup and works for titles that
-                // have no cover online at all. Only auto-fill when the book
-                // doesn't already have one, so this never overwrites a
-                // deliberate choice.
-                if (r?.secure_url && !value.cover_url) {
+                // have no cover online at all. autoCoverFromPdf keeps any
+                // existing cover that actually loads, so a deliberate choice
+                // is never overwritten.
+                if (r?.secure_url) {
                   void autoCoverFromPdf(r.secure_url, r.public_id ?? "");
                 }
               }}
